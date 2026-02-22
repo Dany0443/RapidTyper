@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <title>FastTyper — Live Board</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+    <style>
+        :root {
+            --bg:    #0e0f11;
+            --panel: #16181c;
+            --edge:  #1f2227;
+            --gold:  #e2b714;
+            --gold2: #f5c842;
+            --silver:#b0b8c8;
+            --bronze:#cd8b4a;
+            --text:  #e8e6df;
+            --sub:   #5a5e67;
+            --green: #22c55e;
+            --red:   #ef4444;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+            user-select: none;
+        }
+
+        /* scanline texture for board feel */
+        body::before {
+            content: '';
+            position: fixed; inset: 0;
+            background: repeating-linear-gradient(
+                0deg, transparent, transparent 2px,
+                rgba(0,0,0,0.04) 2px, rgba(0,0,0,0.04) 4px
+            );
+            pointer-events: none;
+            z-index: 9999;
+        }
+
+        .screen { display: none; width: 100vw; height: 100vh; position: fixed; top: 0; left: 0; flex-direction: column; }
+        .screen.active { display: flex; }
+        * { scrollbar-width: none; }
+        *::-webkit-scrollbar { display: none; }
+
+        /* ── CONNECTING ── */
+        #connecting-screen {
+            justify-content: center; align-items: center;
+            background: var(--bg); z-index: 2000; gap: 1.5rem;
+        }
+        .conn-logo { font-family: 'Bebas Neue', sans-serif; font-size: 5rem; color: var(--gold); letter-spacing: 6px; line-height: 1; }
+        .conn-sub { color: var(--sub); font-size: 0.9rem; letter-spacing: 3px; text-transform: uppercase; }
+        .conn-dots { display: flex; gap: 8px; margin-top: 0.5rem; }
+        .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); opacity: 0.3; animation: dotPulse 1.4s ease-in-out infinite; }
+        .conn-dot:nth-child(2) { animation-delay: 0.2s; }
+        .conn-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes dotPulse { 0%,80%,100% { opacity: 0.3; } 40% { opacity: 1; } }
+
+        /* ── SHARED HEADER ── */
+        .board-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 2.5rem; height: 62px;
+            border-bottom: 1px solid var(--edge);
+            background: var(--panel); flex-shrink: 0;
+        }
+        .header-logo { font-family: 'Bebas Neue', sans-serif; font-size: 2.2rem; letter-spacing: 4px; color: var(--gold); }
+        .header-logo span { color: var(--text); }
+        .header-badge {
+            background: var(--edge); border: 1px solid var(--sub);
+            border-radius: 6px; padding: 4px 14px;
+            font-size: 0.72rem; letter-spacing: 2px; color: var(--sub); text-transform: uppercase;
+        }
+        .header-badge.live { border-color: var(--green); color: var(--green); animation: livePulse 2s ease-in-out infinite; }
+        @keyframes livePulse { 0%,100% { box-shadow: none; } 50% { box-shadow: 0 0 0 4px rgba(34,197,94,0.15); } }
+        .header-right { display: flex; align-items: center; gap: 1rem; }
+        .conn-status { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+
+        /* ══════════════════════════════════
+           LOBBY
+        ══════════════════════════════════ */
+        #lobby-screen { background: var(--bg); }
+        .lobby-body { flex: 1; display: grid; grid-template-columns: 200px 1fr; overflow: hidden; }
+
+        .lobby-sidebar {
+            background: var(--panel); border-right: 1px solid var(--edge);
+            display: flex; flex-direction: column; align-items: center;
+            justify-content: center; gap: 2rem; padding: 2rem;
+        }
+        .stat-num { font-family: 'Bebas Neue', sans-serif; font-size: 5.5rem; line-height: 1; color: var(--gold); }
+        .stat-lbl { font-size: 0.65rem; letter-spacing: 3px; text-transform: uppercase; color: var(--sub); margin-top: 2px; }
+        .sidebar-div { width: 40px; height: 1px; background: var(--edge); }
+        .waiting-text { font-family: 'Bebas Neue', sans-serif; font-size: 1.3rem; letter-spacing: 4px; color: var(--sub); text-align: center; animation: waitBlink 2.5s ease-in-out infinite; }
+        @keyframes waitBlink { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+        .lobby-grades { display: grid; grid-template-columns: 1fr 1fr 1fr; overflow: hidden; }
+        .grade-col { border-right: 1px solid var(--edge); display: flex; flex-direction: column; overflow: hidden; }
+        .grade-col:last-child { border-right: none; }
+        .grade-col-header { padding: 1rem 1.5rem; border-bottom: 1px solid var(--edge); background: var(--panel); display: flex; align-items: center; justify-content: space-between; }
+        .grade-col-title { font-family: 'Bebas Neue', sans-serif; font-size: 1.5rem; letter-spacing: 3px; color: var(--gold); }
+        .grade-count { background: rgba(226,183,20,0.12); color: var(--gold); border-radius: 20px; padding: 2px 10px; font-size: 0.72rem; font-weight: 700; }
+        .grade-players { flex: 1; overflow-y: auto; padding: 0.75rem; }
+
+        .lobby-player-row {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 12px; border-radius: 8px; margin-bottom: 5px;
+            background: var(--edge); border: 1px solid transparent;
+            animation: rowIn 0.3s cubic-bezier(0.23,1,0.32,1);
+        }
+        @keyframes rowIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+        .player-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; box-shadow: 0 0 6px var(--green); }
+        .player-name-lbl { font-weight: 600; font-size: 0.88rem; flex: 1; }
+
+        /* ══════════════════════════════════
+           RACING
+        ══════════════════════════════════ */
+        #racing-screen { background: var(--bg); overflow: hidden; }
+        .race-body { flex: 1; display: grid; grid-template-columns: 1fr 250px; overflow: hidden; }
+
+        .race-tracks { padding: 1.25rem 1.75rem; overflow-y: auto; }
+        .race-row {
+            display: flex; align-items: center; gap: 12px;
+            margin-bottom: 9px; padding: 10px 14px;
+            border-radius: 10px; background: var(--panel);
+            border: 1px solid var(--edge); transition: border-color 0.4s;
+        }
+        .race-row.leading { border-color: rgba(226,183,20,0.45); }
+
+        .race-rank { font-family: 'Bebas Neue', sans-serif; font-size: 1.5rem; color: var(--sub); width: 26px; text-align: center; flex-shrink: 0; }
+        .race-rank.r1 { color: var(--gold); }
+        .race-rank.r2 { color: var(--silver); }
+        .race-rank.r3 { color: var(--bronze); }
+        .race-name { width: 125px; flex-shrink: 0; font-weight: 700; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .race-grade-tag { font-size: 0.62rem; padding: 2px 7px; border-radius: 4px; background: var(--edge); color: var(--sub); letter-spacing: 1px; flex-shrink: 0; }
+
+        .race-track-bar { flex: 1; height: 14px; background: var(--edge); border-radius: 7px; position: relative; overflow: visible; }
+        .race-fill {
+            height: 100%; border-radius: 7px; min-width: 0;
+            background: linear-gradient(90deg, #9a7010, var(--gold) 70%, var(--gold2));
+            transition: width 0.6s cubic-bezier(0.25,0.46,0.45,0.94);
+            position: relative;
+        }
+        .race-fill.is-leading { box-shadow: 0 0 14px rgba(226,183,20,0.55); background: linear-gradient(90deg, #9a7010, var(--gold) 60%, #fffacc); }
+        .race-car { position: absolute; right: -14px; top: 50%; transform: translateY(-50%); font-size: 1rem; filter: drop-shadow(0 0 5px rgba(226,183,20,0.8)); }
+
+        .race-wpm { width: 55px; text-align: right; flex-shrink: 0; }
+        .race-wpm-val { font-family: 'DM Mono', monospace; font-size: 1rem; font-weight: 500; color: var(--gold); }
+        .race-wpm-lbl { font-size: 0.52rem; color: var(--sub); letter-spacing: 1px; text-transform: uppercase; }
+        .race-done-badge { font-size: 0.62rem; padding: 2px 8px; background: rgba(34,197,94,0.12); color: var(--green); border-radius: 4px; border: 1px solid rgba(34,197,94,0.3); flex-shrink: 0; }
+
+        .race-sidebar { background: var(--panel); border-left: 1px solid var(--edge); display: flex; flex-direction: column; padding: 1.5rem; gap: 1.25rem; }
+        .race-timer-label { font-size: 0.62rem; letter-spacing: 3px; color: var(--sub); text-transform: uppercase; margin-bottom: 2px; }
+        .race-timer-val { font-family: 'Bebas Neue', sans-serif; font-size: 6rem; line-height: 1; color: var(--text); transition: color 0.3s; text-align: center; }
+        .race-timer-val.urgent { color: var(--red); animation: urgentFlash 0.5s ease-in-out infinite; }
+        @keyframes urgentFlash { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+        .sidebar-div { height: 1px; background: var(--edge); }
+        .race-mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .mini-stat { background: var(--edge); border-radius: 8px; padding: 10px; text-align: center; }
+        .mini-stat-num { font-family: 'Bebas Neue', sans-serif; font-size: 1.9rem; color: var(--gold); line-height: 1; }
+        .mini-stat-lbl { font-size: 0.58rem; letter-spacing: 2px; color: var(--sub); text-transform: uppercase; margin-top: 2px; }
+        .sidebar-section-title { font-size: 0.62rem; letter-spacing: 3px; color: var(--sub); text-transform: uppercase; padding-bottom: 8px; border-bottom: 1px solid var(--edge); }
+        .leader-card { background: var(--edge); border: 1px solid rgba(226,183,20,0.25); border-radius: 10px; padding: 12px; }
+        .leader-name { font-family: 'Bebas Neue', sans-serif; font-size: 1.55rem; letter-spacing: 2px; color: var(--gold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .leader-meta { font-size: 0.72rem; color: var(--sub); margin-top: 1px; }
+        .leader-wpm { font-family: 'Bebas Neue', sans-serif; font-size: 2rem; color: var(--gold); line-height: 1; margin-top: 4px; }
+
+        /* ══════════════════════════════════
+           RESULTS
+        ══════════════════════════════════ */
+        #results-screen { background: radial-gradient(ellipse at 50% -10%, #1c1800 0%, var(--bg) 65%); overflow: hidden; }
+        .results-body { flex: 1; display: flex; flex-direction: column; padding: 1.25rem 2rem; gap: 1.25rem; overflow: hidden; }
+        .results-headline { text-align: center; flex-shrink: 0; }
+        .results-title { font-family: 'Bebas Neue', sans-serif; font-size: 3.2rem; letter-spacing: 8px; color: var(--gold); line-height: 1; animation: titleIn 0.7s cubic-bezier(0.23,1,0.32,1); }
+        @keyframes titleIn { from { opacity: 0; transform: translateY(-18px); } to { opacity: 1; transform: translateY(0); } }
+        .results-sub { font-size: 0.72rem; letter-spacing: 4px; color: var(--sub); text-transform: uppercase; margin-top: 4px; }
+        .results-grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.25rem; overflow: hidden; }
+
+        .result-cat {
+            background: var(--panel); border: 1px solid var(--edge);
+            border-radius: 14px; display: flex; flex-direction: column; overflow: hidden;
+            animation: catIn 0.6s cubic-bezier(0.23,1,0.32,1) both;
+        }
+        .result-cat:nth-child(1) { animation-delay: 0.08s; }
+        .result-cat:nth-child(2) { animation-delay: 0.22s; }
+        .result-cat:nth-child(3) { animation-delay: 0.36s; }
+        @keyframes catIn { from { opacity: 0; transform: translateY(28px); } to { opacity: 1; transform: translateY(0); } }
+
+        .result-cat-header { padding: 0.9rem 1.4rem; border-bottom: 1px solid var(--edge); background: rgba(226,183,20,0.05); display: flex; align-items: center; justify-content: space-between; }
+        .result-cat-title { font-family: 'Bebas Neue', sans-serif; font-size: 1.7rem; letter-spacing: 4px; color: var(--gold); }
+        .result-cat-count { font-size: 0.72rem; color: var(--sub); }
+
+        .podium-stage { display: flex; align-items: flex-end; justify-content: center; gap: 8px; padding: 1rem 1.25rem 0; height: 195px; flex-shrink: 0; }
+        .podium-slot { display: flex; flex-direction: column; align-items: center; flex: 1; max-width: 100px; }
+        .podium-avatar { width: 42px; height: 42px; border-radius: 50%; border: 3px solid var(--sub); display: flex; align-items: center; justify-content: center; font-size: 1.1rem; background: var(--edge); margin-bottom: 5px; flex-shrink: 0; }
+        .podium-slot.p1 .podium-avatar { border-color: var(--gold); box-shadow: 0 0 16px rgba(226,183,20,0.4); }
+        .podium-slot.p2 .podium-avatar { border-color: var(--silver); }
+        .podium-slot.p3 .podium-avatar { border-color: var(--bronze); }
+        .podium-uname { font-size: 0.68rem; font-weight: 700; text-align: center; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 5px; }
+        .podium-block { width: 100%; border-radius: 8px 8px 0 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px 4px; transform-origin: bottom; animation: blockGrow 0.7s cubic-bezier(0.23,1,0.32,1) both; }
+        .podium-slot.p1 .podium-block { height: 148px; background: linear-gradient(180deg, var(--gold2), #8a6c0a); animation-delay: 0.45s; }
+        .podium-slot.p2 .podium-block { height: 108px; background: linear-gradient(180deg, #d4dce8, #677080); animation-delay: 0.55s; }
+        .podium-slot.p3 .podium-block { height: 76px;  background: linear-gradient(180deg, #dba06a, #7a461e); animation-delay: 0.65s; }
+        @keyframes blockGrow { from { transform: scaleY(0); opacity: 0; } to { transform: scaleY(1); opacity: 1; } }
+        .podium-rank-lbl { font-family: 'Bebas Neue', sans-serif; font-size: 1.2rem; color: rgba(0,0,0,0.45); line-height: 1; }
+        .podium-wpm-val { font-family: 'Bebas Neue', sans-serif; font-size: 1.8rem; color: #000; line-height: 1; }
+        .podium-wpm-unit { font-size: 0.5rem; color: rgba(0,0,0,0.55); letter-spacing: 1px; text-transform: uppercase; }
+        .podium-acc-val { font-size: 0.6rem; color: rgba(0,0,0,0.5); margin-top: 2px; }
+
+        .result-rest { padding: 0.6rem 1rem 0.8rem; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+        .rest-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 6px; background: var(--edge); font-size: 0.78rem; animation: rowIn 0.3s ease both; }
+        .rest-rank { color: var(--sub); width: 20px; text-align: center; font-family: 'DM Mono', monospace; font-size: 0.72rem; }
+        .rest-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .rest-wpm { color: var(--gold); font-family: 'DM Mono', monospace; font-size: 0.78rem; }
+        .rest-acc { color: var(--sub); font-size: 0.7rem; }
+        .no-players-msg { text-align: center; color: var(--sub); font-size: 0.8rem; letter-spacing: 2px; padding: 2.5rem; text-transform: uppercase; }
+    </style>
+</head>
+<body>
+
+    <!-- CONNECTING -->
+    <div id="connecting-screen" class="screen active">
+        <div class="conn-logo">Fast<span style="color:var(--text)">Typer</span></div>
+        <div class="conn-sub">Se conectează la server</div>
+        <div class="conn-dots">
+            <div class="conn-dot"></div><div class="conn-dot"></div><div class="conn-dot"></div>
+        </div>
+    </div>
+
+    <!-- LOBBY -->
+    <div id="lobby-screen" class="screen">
+        <div class="board-header">
+            <div class="header-logo">Fast<span>Typer</span></div>
+            <div class="header-badge">Sala de Așteptare</div>
+            <div class="header-right">
+                <div class="conn-status"></div>
+                <span style="font-size:0.72rem;color:var(--sub);letter-spacing:1px;">LIVE</span>
+            </div>
+        </div>
+        <div class="lobby-body">
+            <div class="lobby-sidebar">
+                <div>
+                    <div class="stat-num" id="lobby-count">0</div>
+                    <div class="stat-lbl">Jucători</div>
+                </div>
+                <div class="sidebar-div"></div>
+                <div class="waiting-text">Așteptăm<br>startul</div>
+                <div class="conn-dots">
+                    <div class="conn-dot"></div><div class="conn-dot"></div><div class="conn-dot"></div>
+                </div>
+            </div>
+            <div class="lobby-grades">
+                <div class="grade-col">
+                    <div class="grade-col-header">
+                        <div class="grade-col-title">Clasa 1–4</div>
+                        <div class="grade-count" id="cnt-1-4">0</div>
+                    </div>
+                    <div id="list-1-4" class="grade-players"></div>
+                </div>
+                <div class="grade-col">
+                    <div class="grade-col-header">
+                        <div class="grade-col-title">Clasa 5–9</div>
+                        <div class="grade-count" id="cnt-5-9">0</div>
+                    </div>
+                    <div id="list-5-9" class="grade-players"></div>
+                </div>
+                <div class="grade-col">
+                    <div class="grade-col-header">
+                        <div class="grade-col-title">Clasa 10–12</div>
+                        <div class="grade-count" id="cnt-10-12">0</div>
+                    </div>
+                    <div id="list-10-12" class="grade-players"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- RACING -->
+    <div id="racing-screen" class="screen">
+        <div class="board-header">
+            <div class="header-logo">Fast<span>Typer</span></div>
+            <div class="header-badge live">● LIVE RACE</div>
+            <div class="header-right"><div class="conn-status"></div></div>
+        </div>
+        <div class="race-body">
+            <div class="race-tracks" id="race-tracks"></div>
+            <div class="race-sidebar">
+                <div>
+                    <div class="race-timer-label">Timp Rămas</div>
+                    <div class="race-timer-val" id="race-timer">20</div>
+                </div>
+                <div class="sidebar-div"></div>
+                <div class="race-mini-grid">
+                    <div class="mini-stat">
+                        <div class="mini-stat-num" id="stat-players">0</div>
+                        <div class="mini-stat-lbl">Jucători</div>
+                    </div>
+                    <div class="mini-stat">
+                        <div class="mini-stat-num" id="stat-finished">0</div>
+                        <div class="mini-stat-lbl">Gata</div>
+                    </div>
+                </div>
+                <div class="sidebar-div"></div>
+                <div class="sidebar-section-title">Lider curent</div>
+                <div class="leader-card" id="leader-card">
+                    <div class="leader-name" style="color:var(--sub)">—</div>
+                    <div class="leader-meta">niciun lider încă</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- RESULTS -->
+    <div id="results-screen" class="screen">
+        <div class="board-header">
+            <div class="header-logo">Fast<span>Typer</span></div>
+            <div class="header-badge">Rezultate Finale</div>
+            <div class="header-right"><div class="conn-status"></div></div>
+        </div>
+        <div class="results-body">
+            <div class="results-headline">
+                <div class="results-title">🏆 Clasament Final</div>
+                <div class="results-sub">Top performeri pe categorie de vârstă</div>
+            </div>
+            <div class="results-grid">
+                <div class="result-cat">
+                    <div class="result-cat-header">
+                        <div class="result-cat-title">Clasa 1–4</div>
+                        <div class="result-cat-count" id="rcount-1-4"></div>
+                    </div>
+                    <div class="podium-stage" id="podium-1-4"></div>
+                    <div class="result-rest" id="rest-1-4"></div>
+                </div>
+                <div class="result-cat">
+                    <div class="result-cat-header">
+                        <div class="result-cat-title">Clasa 5–9</div>
+                        <div class="result-cat-count" id="rcount-5-9"></div>
+                    </div>
+                    <div class="podium-stage" id="podium-5-9"></div>
+                    <div class="result-rest" id="rest-5-9"></div>
+                </div>
+                <div class="result-cat">
+                    <div class="result-cat-header">
+                        <div class="result-cat-title">Clasa 10–12</div>
+                        <div class="result-cat-count" id="rcount-10-12"></div>
+                    </div>
+                    <div class="podium-stage" id="podium-10-12"></div>
+                    <div class="result-rest" id="rest-10-12"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const WS_URL = "ws://localhost:5889";
+
+        let ws, gamePhase = 'LOBBY', players = [];
+        let raceStartTime = null, raceDuration = 20;
+        let timerInterval = null, confettiTriggered = false;
+        let reconnectAttempts = 0;
+
+        function connect() {
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                reconnectAttempts = 0;
+                ws.send(JSON.stringify({ type: 'PRESENTATION_JOIN' }));
+                showScreen('lobby-screen');
+            };
+
+            ws.onclose = () => {
+                showScreen('connecting-screen');
+                const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 15000);
+                reconnectAttempts++;
+                setTimeout(connect, delay);
+            };
+
+            ws.onerror = () => {};
+
+            ws.onmessage = (e) => {
+                try { handleMessage(JSON.parse(e.data)); } catch (_) {}
+            };
+        }
+
+        function handleMessage(data) {
+            switch (data.type) {
+                case 'FULL_STATE_SYNC':
+                    gamePhase = data.state?.phase || gamePhase;
+                    updateUI();
+                    break;
+                case 'UPDATE_LOBBY':
+                    if (data.players) players = data.players;
+                    gamePhase = data.phase || gamePhase;
+                    if (gamePhase === 'LOBBY' || gamePhase === 'COUNTDOWN') renderLobby();
+                    else if (gamePhase === 'RACING') renderRacing();
+                    break;
+                case 'START_GAME':
+                    gamePhase = 'RACING';
+                    raceStartTime = data.startTime || Date.now();
+                    raceDuration = data.duration || 20;
+                    confettiTriggered = false;
+                    showScreen('racing-screen');
+                    startRaceTimer();
+                    break;
+                case 'GAME_OVER':
+                    gamePhase = 'FINISHED';
+                    stopRaceTimer();
+                    showScreen('results-screen');
+                    renderResults();
+                    break;
+                case 'FORCE_RESET':
+                    gamePhase = 'LOBBY';
+                    confettiTriggered = false;
+                    stopRaceTimer();
+                    players = [];
+                    showScreen('lobby-screen');
+                    renderLobby();
+                    break;
+                case 'COUNTDOWN':
+                    if (gamePhase !== 'RACING') {
+                        gamePhase = 'COUNTDOWN';
+                        showScreen('lobby-screen');
+                    }
+                    break;
+            }
+        }
+
+        function showScreen(id) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+        }
+
+        function updateUI() {
+            if (gamePhase === 'RACING')       { showScreen('racing-screen');  renderRacing();  }
+            else if (gamePhase === 'FINISHED') { showScreen('results-screen'); renderResults(); }
+            else                               { showScreen('lobby-screen');   renderLobby();   }
+        }
+
+        /* ── LOBBY ── */
+        function renderLobby() {
+            const groups = { '1-4': [], '5-9': [], '10-12': [] };
+            players.forEach(p => { (groups[p.grade] || groups['10-12']).push(p); });
+            document.getElementById('lobby-count').textContent = players.length;
+            ['1-4', '5-9', '10-12'].forEach(g => {
+                document.getElementById(`cnt-${g}`).textContent = groups[g].length;
+                const el = document.getElementById(`list-${g}`);
+                if (!el) return;
+                el.innerHTML = groups[g].length === 0
+                    ? '<div style="text-align:center;color:var(--sub);padding:2rem;font-size:0.8rem;letter-spacing:2px;text-transform:uppercase;">—</div>'
+                    : groups[g].map(p => `
+                        <div class="lobby-player-row">
+                            <div class="player-dot"></div>
+                            <div class="player-name-lbl">${esc(p.username)}</div>
+                        </div>`).join('');
+            });
+        }
+
+        /* ── RACING ── */
+        function renderRacing() {
+            const sorted = [...players].sort((a, b) => (b.progress || 0) - (a.progress || 0));
+            document.getElementById('race-tracks').innerHTML = sorted.map((p, i) => {
+                const prog = p.progress || 0;
+                const lead = i === 0 && prog > 0;
+                const rc = ['r1','r2','r3'][i] || '';
+                return `
+                <div class="race-row ${lead ? 'leading' : ''}">
+                    <div class="race-rank ${rc}">${i + 1}</div>
+                    <div class="race-name">${esc(p.username)}</div>
+                    <div class="race-grade-tag">${esc(p.grade)}</div>
+                    <div class="race-track-bar">
+                        <div class="race-fill ${lead ? 'is-leading' : ''}" style="width:${prog}%">
+                            <span class="race-car">🚗</span>
+                        </div>
+                    </div>
+                    <div class="race-wpm">
+                        <div class="race-wpm-val">${p.wpm || 0}</div>
+                        <div class="race-wpm-lbl">CPM</div>
+                    </div>
+                    ${p.finished ? '<div class="race-done-badge">✓ GATA</div>' : ''}
+                </div>`;
+            }).join('');
+
+            document.getElementById('stat-players').textContent = players.length;
+            document.getElementById('stat-finished').textContent = players.filter(p => p.finished).length;
+
+            const leader = sorted[0];
+            if (leader && (leader.progress || 0) > 0) {
+                document.getElementById('leader-card').innerHTML = `
+                    <div class="leader-name">${esc(leader.username)}</div>
+                    <div class="leader-meta">Clasa ${esc(leader.grade)} · ${leader.acc || 0}% acc</div>
+                    <div class="leader-wpm">${leader.wpm || 0} <span style="font-size:0.8rem;color:var(--sub)">CPM</span></div>`;
+            }
+        }
+
+        /* ── TIMER ── */
+        function startRaceTimer() {
+            stopRaceTimer();
+            timerInterval = setInterval(() => {
+                const elapsed = (Date.now() - raceStartTime) / 1000;
+                const rem = Math.max(0, Math.round(raceDuration - elapsed));
+                const el = document.getElementById('race-timer');
+                el.textContent = rem;
+                el.classList.toggle('urgent', rem <= 5 && rem > 0);
+                if (rem <= 0) stopRaceTimer();
+            }, 250);
+        }
+        function stopRaceTimer() {
+            if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+        }
+
+        /* ── RESULTS ── */
+        function renderResults() {
+            ['1-4', '5-9', '10-12'].forEach(grade => {
+                const list = players.filter(p => p.grade === grade)
+                    .sort((a, b) => (b.wpm || 0) - (a.wpm || 0));
+
+                document.getElementById(`rcount-${grade}`).textContent = `${list.length} jucători`;
+
+                const podiumEl = document.getElementById(`podium-${grade}`);
+                const restEl   = document.getElementById(`rest-${grade}`);
+
+                if (list.length === 0) {
+                    podiumEl.innerHTML = '<div class="no-players-msg">Fără participanți</div>';
+                    restEl.innerHTML = '';
+                    return;
+                }
+
+                // 2nd left, 1st center, 3rd right
+                const slots = [
+                    { p: list[1], rank: 2, icon: '🥈', cls: 'p2' },
+                    { p: list[0], rank: 1, icon: '👑', cls: 'p1' },
+                    { p: list[2], rank: 3, icon: '🥉', cls: 'p3' },
+                ];
+
+                podiumEl.innerHTML = slots.map(s => s.p ? `
+                    <div class="podium-slot ${s.cls}">
+                        <div class="podium-avatar">${s.icon}</div>
+                        <div class="podium-uname">${esc(s.p.username)}</div>
+                        <div class="podium-block">
+                            <div class="podium-rank-lbl">#${s.rank}</div>
+                            <div class="podium-wpm-val">${s.p.wpm || 0}</div>
+                            <div class="podium-wpm-unit">CPM</div>
+                            <div class="podium-acc-val">${s.p.acc || 0}% acc</div>
+                        </div>
+                    </div>` : `<div class="podium-slot"></div>`).join('');
+
+                restEl.innerHTML = list.slice(3).map((p, i) => `
+                    <div class="rest-row" style="animation-delay:${i * 0.05}s">
+                        <div class="rest-rank">${i + 4}</div>
+                        <div class="rest-name">${esc(p.username)}</div>
+                        <div class="rest-wpm">${p.wpm || 0}</div>
+                        <div class="rest-acc">${p.acc || 0}%</div>
+                    </div>`).join('');
+            });
+
+            if (!confettiTriggered) {
+                confettiTriggered = true;
+                const end = Date.now() + 3500;
+                (function burst() {
+                    confetti({ particleCount: 4, angle: 60,  spread: 55, origin: { x: 0 }, colors: ['#e2b714','#fff','#f5c842'] });
+                    confetti({ particleCount: 4, angle: 120, spread: 55, origin: { x: 1 }, colors: ['#e2b714','#fff','#b0b8c8'] });
+                    if (Date.now() < end) requestAnimationFrame(burst);
+                })();
+            }
+        }
+
+        function esc(s) {
+            return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        connect();
+    </script>
+</body>
+</html>

@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SpellingBee - Client</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+    <style>
+        :root { --bg: #323437; --main: #e2b714; --sub: #646669; --text: #d1d0c5; --correct: #22c55e; --wrong: #ef4444; }
+        body { background: var(--bg); color: var(--text); font-family: 'Roboto Mono', monospace; overflow-x: hidden; }
+
+        .screen { display: none; opacity: 0; transition: opacity 0.3s ease; }
+        .screen.active { display: block; opacity: 1; }
+
+        .btn { background: transparent; color: var(--sub); border: 2px solid transparent; padding: 0.75rem 2rem; border-radius: 0.5rem; transition: 0.2s; cursor: pointer; font-weight: 700; }
+        .btn:hover { color: var(--text); border-color: var(--sub); }
+        .btn-primary { color: var(--main); border-color: var(--main); }
+        .btn-primary:hover { background: var(--main); color: var(--bg); }
+        
+        .grade-btn.selected { border-color: var(--main); color: var(--main); background: rgba(226, 183, 20, 0.1); }
+        
+        #typing-wrapper { 
+            background: #2c2e31; 
+            border-radius: 12px; 
+            padding: 2rem; 
+            position: relative; 
+            margin-top: 2rem; 
+            max-width: 1000px; 
+            border: 1px solid var(--sub);
+            transition: border-color 0.3s;
+        }
+        #typing-wrapper:focus-within { border-color: var(--main); }
+
+        .game-input { 
+            background: transparent; 
+            border: none; 
+            font-size: 1.5rem; 
+            color: var(--text); 
+            width: 100%; 
+            min-height: 200px;
+            outline: none; 
+            line-height: 1.6;
+            font-family: 'Roboto Mono', monospace;
+            resize: none;
+        }
+
+        .debug-info {
+            position: fixed;
+            bottom: 4px;
+            left: 4px;
+            font-size: 11px;
+            color: #646669;
+            font-family: 'Roboto Mono', monospace;
+            opacity: 0.7;
+        }
+        
+        .status-indicator { width: 10px; height: 10px; border-radius: 50%; }
+        .status-green { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+        .status-red { background: #ef4444; box-shadow: 0 0 10px #ef4444; }
+
+        .diff-word { padding: 0 2px; border-radius: 2px; }
+        .diff-correct { color: var(--correct); }
+        .diff-wrong { color: var(--wrong); text-decoration: line-through; }
+        .diff-expected { color: var(--main); font-weight: bold; margin-left: 4px; }
+
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+        @keyframes shake { 
+            0%, 100% { transform: translateX(0); } 
+            10%, 30%, 50%, 70%, 90% { transform: translateX(-10px); } 
+            20%, 40%, 60%, 80% { transform: translateX(10px); } 
+        }
+        .animate-pulse-custom { animation: pulse 2s infinite; }
+        .animate-shake { animation: shake 0.6s; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <header class="w-full p-6 flex justify-between items-center">
+        <div class="flex items-center gap-3 cursor-pointer" onclick="location.reload()">
+            <i class="fa-solid fa-spell-check text-3xl" style="color: var(--main)"></i>
+            <div><h1 class="text-2xl font-bold">Spelling<span style="color: var(--main)">Bee</span></h1></div>
+        </div>
+        <div class="flex items-center gap-4 text-sm" style="color: var(--sub)">
+            <div class="flex items-center gap-2">
+                <div id="status-dot" class="status-indicator status-red"></div>
+                <span id="status-text">Connecting...</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <i class="fa-solid fa-user"></i>
+                <span id="display-name">Guest</span>
+            </div>
+            <button onclick="changeName()" class="btn text-xs px-3 py-1" id="change-name-btn" style="display: none;">Schimba Numele</button>
+        </div>
+    </header>
+
+    <main class="flex-1 flex items-center justify-center p-8">
+
+        <div class="debug-info z-50 hover:opacity-100 transition-opacity">
+        <div class="flex items-center gap-2 mb-1">
+        <i class="fa-solid fa-network-wired text-xs"></i>
+        <span id="sync-indicator"></span>
+        </div>
+        <div id="grade-indicator">Grade: <span id="grade-display">-</span></div>
+        </div>
+
+        <!-- CONNECTING SCREEN -->
+        <div id="connecting-screen" class="screen active text-center max-w-md w-full p-6">
+            <div class="inline-block p-4 rounded-full mb-6" style="background: rgba(226, 183, 20, 0.1);">
+                <i class="fa-solid fa-circle-notch fa-spin text-4xl" style="color: var(--main)"></i>
+            </div>
+            <h2 class="text-2xl font-bold mb-2">Se conectează...</h2>
+            <p class="text-sm" style="color: var(--sub)">Se stabilește conexiunea cu serverul</p>
+        </div>
+
+        <!-- LOGIN SCREEN -->
+        <div id="login-screen" class="screen text-center max-w-md w-full p-6">
+            
+            <div class="mb-10">
+                <div class="inline-block p-4 rounded-full bg-opacity-10 mb-4" style="background: rgba(226, 183, 20, 0.1);">
+                    <i class="fa-solid fa-user-astronaut text-4xl" style="color: var(--main)"></i>
+                </div>
+                <h2 class="text-3xl font-bold">Bine ai venit!</h2>
+            </div>
+
+            <div class="mb-8 text-left">
+                <label class="text-xs font-bold ml-1 uppercase tracking-wider mb-2 block" style="color: var(--sub)">Nume Utilizator</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        <i class="fa-solid fa-user" style="color: var(--sub)"></i>
+                    </div>
+                    <input type="text" id="username-input" 
+                        class="w-full rounded-lg pl-12 pr-4 py-4 outline-none font-bold transition-all shadow-sm" 
+                        style="background: rgba(0,0,0,0.2); border: 2px solid var(--sub); color: var(--text);"
+                        placeholder="Introdu un Nume" maxlength="15" autocomplete="off"
+                        onfocus="this.style.borderColor = 'var(--main)'; this.style.background = 'rgba(0,0,0,0.4)';"
+                        onblur="this.style.borderColor = 'var(--sub)'; this.style.background = 'rgba(0,0,0,0.2)';"
+                        onkeydown="if(event.key==='Enter') joinGame()">
+                </div>
+            </div>
+
+            <div class="mb-10 text-left">
+                <label class="text-xs font-bold ml-1 uppercase tracking-wider mb-2 block" style="color: var(--sub)">Selectează Clasa</label>
+                <div class="grid grid-cols-3 gap-3" id="grade-buttons">
+                    <button onclick="selectGrade('1-4', this)" class="grade-btn btn w-full px-2 whitespace-nowrap" style="background: rgba(0,0,0,0.2)">1 - 4</button>
+                    <button onclick="selectGrade('5-9', this)" class="grade-btn btn w-full px-2 whitespace-nowrap" style="background: rgba(0,0,0,0.2)">5 - 9</button>
+                    <button onclick="selectGrade('10-12', this)" class="grade-btn btn w-full px-2 whitespace-nowrap" style="background: rgba(0,0,0,0.2)">10 - 12</button>
+                </div>
+            </div>
+
+            <button onclick="joinGame()" class="btn btn-primary w-full py-4 text-lg shadow-lg flex items-center justify-center gap-3 hover:scale-[1.02] active:scale-[0.98] transition-transform">
+                <span>Intră</span> 
+                <i class="fa-solid fa-arrow-right"></i>
+            </button>
+        </div>
+
+        <!-- WAITING SCREEN -->
+        <div id="waiting-screen" class="screen text-center">
+            <div class="animate-pulse-custom">
+                <i class="fa-solid fa-ear-listen text-6xl mb-6" style="color: var(--main)"></i>
+            </div>
+            <h2 class="text-3xl font-bold mb-2">Asteptarea startului</h2>
+            <div id="spell-wait-round" class="text-sm mt-1" style="color:var(--sub);letter-spacing:2px;"></div>
+            
+            <div class="bg-gray-800 p-4 rounded-lg inline-block min-w-[200px] mt-8">
+                <p class="text-xs text-gray-500">Playeri Conectati</p>
+                <p class="text-4xl font-bold text-white" id="waiting-count">0</p>
+            </div>
+        </div>
+
+        <!-- GAME SCREEN -->
+        <div id="game-screen" class="screen w-full max-w-5xl text-center">
+            <div class="flex justify-between items-center mb-6">
+                <div class="text-gray-500 uppercase tracking-widest text-xl">Listen and Type</div>
+                <div id="spell-round-badge" class="text-sm font-bold px-3 py-1 rounded" style="background:rgba(226,183,20,0.15);color:var(--main);letter-spacing:1px;"></div>
+            </div>
+            
+            <div id="typing-wrapper">
+                <textarea id="spell-input" class="game-input" autocomplete="off" spellcheck="false" placeholder="Type what you hear..."></textarea>
+            </div>
+            
+            <div class="mt-8 flex justify-between items-center max-w-4xl mx-auto">
+                <div class="text-sm text-gray-500">
+                    <i class="fa-solid fa-floppy-disk mr-2"></i> Auto-saved to draft
+                </div>
+                <button onclick="submitDictation()" class="btn btn-primary px-8 py-3 text-lg shadow-lg hover:scale-105 active:scale-95 transition-transform">
+                    <i class="fa-solid fa-paper-plane mr-2"></i> SUBMIT
+                </button>
+            </div>
+        </div>
+
+        <!-- RESULT SCREEN -->
+        <div id="result-screen" class="screen text-center max-w-5xl">
+            <h2 class="text-4xl font-bold mb-8 text-white">Result Analysis</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                    <div class="text-xs text-gray-500 uppercase font-bold">Accuracy</div>
+                    <div class="text-5xl font-bold text-green-500 mt-2"><span id="res-accuracy">0</span>%</div>
+                </div>
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                    <div class="text-xs text-gray-500 uppercase font-bold">Correct Words</div>
+                    <div class="text-5xl font-bold text-blue-500 mt-2"><span id="res-correct">0</span>/<span id="res-total">0</span></div>
+                </div>
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                    <div class="text-xs text-gray-500 uppercase font-bold">Percentile</div>
+                    <div class="text-5xl font-bold text-yellow-500 mt-2"><span id="res-percentile">0</span>%</div>
+                </div>
+            </div>
+
+            <div class="bg-gray-900 p-8 rounded-xl border border-gray-700 text-left font-mono text-lg leading-loose shadow-inner overflow-y-auto max-h-[500px]" id="diff-view">
+                <!-- Diff content will go here -->
+            </div>
+
+            <div class="mt-8">
+                <button onclick="switchScreen('waiting-screen')" class="btn px-8">Back to Waiting Room</button>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        const WS_URL = "ws://localhost:5889";
+        const LS_USER = "mt_spell_user";   // separate key — never collides with racer (mt_user_data)
+        const LS_SPELL_DRAFT = "mt_spell_draft";
+        
+        let reconnectAttempts = 0;
+        let maxReconnectDelay = 30000;
+        let hasJoined = !!JSON.parse(localStorage.getItem(LS_USER) || 'null')?.userId;
+        let currentRound = 0;
+        let maxRounds = 3;
+
+
+        let spellGameState = {
+            active: false,
+            startTime: 0,
+            currentText: ''
+        };
+        let ws;
+        let myData = { username: '', userId: '', grade: '' };
+        let selectedGrade = null;
+        
+        const els = {
+            screens: document.querySelectorAll('.screen'),
+            input: document.getElementById('spell-input')
+        };
+
+        window.onload = () => {
+            const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+            if (user && user.username && user.grade) {
+                document.getElementById('username-input').value = user.username;
+                document.getElementById('display-name').textContent = user.username;
+                document.getElementById('grade-display').textContent = user.grade;
+                selectedGrade = user.grade;  
+                selectGrade(user.grade, null);
+                myData = user;
+            }
+            
+            const draft = localStorage.getItem(LS_SPELL_DRAFT);
+            if(draft) {
+                els.input.value = draft;
+            }
+            
+            // Start connecting — login screen shown only after connection succeeds
+            connect();
+        };
+
+        function selectGrade(grade, btn) {
+            selectedGrade = grade;
+            document.querySelectorAll('.grade-btn').forEach(b => b.classList.remove('selected'));
+            if (btn) {
+                btn.classList.add('selected');
+            } else {
+                document.querySelectorAll('.grade-btn').forEach(b => { 
+                    if (b.textContent.trim() === grade) b.classList.add('selected'); 
+                });
+            }
+        }
+
+        function switchScreen(id) {
+            els.screens.forEach(s => s.classList.remove('active'));
+            document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
+            const t = document.getElementById(id);
+            if (t) { 
+                t.style.display = 'block'; 
+                setTimeout(() => t.classList.add('active'), 50); 
+            }
+        }
+
+        function connect() {
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+            document.getElementById('status-dot').className = 'status-indicator status-green';
+            document.getElementById('status-text').textContent = 'Conectat';
+            document.getElementById('sync-indicator').textContent = 'Connected';
+            reconnectAttempts = 0;
+
+                const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+                if (user && user.userId && user.username) {
+                    // Has saved session — auto-rejoin silently
+                    hasJoined = true;
+                    myData = user;
+                    selectedGrade = user.grade;
+                    document.getElementById('display-name').textContent = user.username;
+                    document.getElementById('change-name-btn').style.display = 'block';
+                    ws.send(JSON.stringify({ 
+                        type: 'JOIN_SPELL',
+                        userId: user.userId,
+                        username: user.username,
+                        grade: user.grade || '1-4'
+                    }));
+                    switchScreen('waiting-screen');
+                } else {
+                    // Fresh user — show login form
+                    switchScreen('login-screen');
+                }
+            };
+            
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                handleServerMessage(data);
+            };
+            
+            ws.onclose = () => { 
+                document.getElementById('status-dot').className = 'status-indicator status-red';
+                const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
+                reconnectAttempts++;
+                document.getElementById('status-text').textContent = `Reconnecting in ${Math.floor(delay/1000)}s...`;
+                const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+                if (!user?.userId) {
+                    switchScreen('connecting-screen');
+                }
+                setTimeout(connect, delay);
+            };
+            
+            ws.onerror = (err) => {
+                document.getElementById('status-dot').className = 'status-indicator status-red';
+                document.getElementById('status-text').textContent = 'Connection Error';
+                console.error('WebSocket error:', err);
+            };
+        }
+
+        function handleServerMessage(data) {
+            switch (data.type) {
+                case 'UPDATE_SPELLERS':
+                    document.getElementById('waiting-count').textContent = data.count || 0;
+                    break;
+
+                case 'SYNC_STATE':
+                    // Issue #11: Don't redirect if actively typing in a round
+                    if (data.mode === 'race' && !spellGameState.active) { window.location.href = 'index.html'; return; }
+                    if (data.currentRound) currentRound = data.currentRound;
+                    if (data.maxRounds)   maxRounds   = data.maxRounds;
+                    if (data.spellRoundActive && hasJoined) switchScreen('waiting-screen');
+                    break;
+
+                case 'MODE_CHANGED':
+                    // Issue #10: Don't redirect if actively in a spell round
+                    if (!spellGameState.active && data.mode === 'race') window.location.href = 'index.html';
+                    break;
+
+                case 'SPELL_LOBBY_UPDATE':
+                    document.getElementById('waiting-count').textContent = data.count || 0;
+                    break;
+
+                case 'SPELL_START':
+                    localStorage.removeItem(LS_SPELL_DRAFT);
+                    if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
+                    spellGameState = { active: true, startTime: Date.now(), currentText: '' };
+                    switchScreen('game-screen');
+                    document.getElementById('spell-input').value = '';
+                    updateSpellRoundBadge();
+                    setTimeout(() => els.input.focus(), 100);
+                    break;
+
+                case 'SERIES_COMPLETE':
+                case 'SERIES_OVER': {
+                    // Issue #9: Show meaningful completion message
+                    const sEl = document.getElementById('spell-round-badge');
+                    if (sEl) sEl.textContent = 'Toate rundele complete!';
+                    const waitRound = document.getElementById('spell-wait-round');
+                    if (waitRound) waitRound.textContent = 'Toate rundele complete!';
+                    // If currently on result or waiting screen, show a completion notice
+                    switchScreen('waiting-screen');
+                    const waitHeader = document.querySelector('#waiting-screen h2');
+                    if (waitHeader) waitHeader.textContent = '🏁 Seria s-a terminat!';
+                    const waitCount = document.querySelector('#waiting-screen .bg-gray-800');
+                    if (waitCount) waitCount.style.display = 'none';
+                    break;
+                }
+
+                case 'SPELL_END':
+                    // Issue #17: Replace jarring alert+reload with graceful transition
+                    spellGameState.active = false;
+                    localStorage.removeItem(LS_SPELL_DRAFT);
+                    switchScreen('waiting-screen');
+                    {
+                        const wh = document.querySelector('#waiting-screen h2');
+                        if (wh) wh.textContent = 'Runda s-a terminat';
+                        const wr = document.getElementById('spell-wait-round');
+                        if (wr) wr.textContent = 'Asteaptă instrucțiunile hostului';
+                    }
+                    break;
+
+                case 'SPELL_RESULT_FULL':
+                    showFullResult(data);
+                    break;
+
+                case 'JOIN_SUCCESS':
+                    switchScreen('waiting-screen');
+                    document.getElementById('change-name-btn').style.display = 'block';
+                    break;
+            }
+        }
+
+        function joinGame() {
+            const name = document.getElementById('username-input').value.trim();
+            const nameInput = document.getElementById('username-input');
+            const gradeButtons = document.getElementById('grade-buttons');
+
+            if (!name || !selectedGrade) {
+                if (!name) {
+                    nameInput.classList.add('animate-shake');
+                    setTimeout(() => nameInput.classList.remove('animate-shake'), 600);
+                }
+                if (!selectedGrade) {
+                    gradeButtons.classList.add('animate-shake');
+                    setTimeout(() => gradeButtons.classList.remove('animate-shake'), 600);
+                }
+                return;
+            }
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                document.getElementById('status-text').textContent = 'Nu ești conectat...';
+                return;
+            }
+            
+            // Reuse existing userId if same name, otherwise generate new one
+            const existing = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+            const userId = (existing && existing.username === name)
+                ? existing.userId
+                : 'sp_' + name.replace(/\s+/g, '_') + '_' + Date.now();
+
+            const userData = { userId, username: name, grade: selectedGrade };
+            localStorage.setItem(LS_USER, JSON.stringify(userData));
+            localStorage.setItem('sb_grade', selectedGrade);
+            document.getElementById('grade-display').textContent = selectedGrade;
+            myData = userData;
+            document.getElementById('display-name').textContent = name;
+            
+            hasJoined = true;
+            ws.send(JSON.stringify({
+                type: 'JOIN_SPELL',
+                userId: userId, 
+                username: name,
+                grade: selectedGrade
+            }));
+            
+            switchScreen('waiting-screen');
+            document.getElementById('change-name-btn').style.display = 'block';
+        }
+
+        function changeName() {
+            localStorage.removeItem(LS_USER);
+            localStorage.removeItem(LS_SPELL_DRAFT);
+            location.reload();
+        }
+
+        els.input.addEventListener('input', (e) => {
+    // Only save draft if game is active
+    if (spellGameState && spellGameState.active) {
+        localStorage.setItem(LS_SPELL_DRAFT, e.target.value);
+    }
+    });
+
+        function updateSpellRoundBadge() {
+            if (!currentRound) return;
+            const els2 = ['spell-round-badge','spell-wait-round'];
+            const txt = `RUNDA ${currentRound} / ${maxRounds}`;
+            els2.forEach(id => { const e = document.getElementById(id); if (e) e.textContent = txt; });
+        }
+
+        function submitDictation() {
+            const text = els.input.value.trim();
+            if(!text) {
+                alert("Please type something before submitting.");
+                return;
+            }
+            if(confirm("Are you sure you want to submit?")) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'SPELL_SUBMIT_FULL', text: text }));
+            
+            // Mark game as finished
+            spellGameState.active = false;
+            localStorage.removeItem(LS_SPELL_DRAFT);
+        } else {
+            alert("Not connected to server!");
+            }
+        }
+    }
+
+        function showFullResult(data) {
+            switchScreen('result-screen');
+            
+            document.getElementById('res-accuracy').textContent = data.accuracy || 0;
+            document.getElementById('res-correct').textContent = data.correctCount || 0;
+            document.getElementById('res-total').textContent = data.totalWords || 0;
+            document.getElementById('res-percentile').textContent = (data.stats && data.stats.percentile) || 0;
+
+            const diffContainer = document.getElementById('diff-view');
+            diffContainer.innerHTML = '';
+            
+            if(data.diff && Array.isArray(data.diff)) {
+                data.diff.forEach(item => {
+                    const span = document.createElement('span');
+                    span.className = 'diff-word inline-block mr-1 mb-1';
+                    
+                    if(item.status === 'correct') {
+                        span.classList.add('diff-correct');
+                        span.textContent = item.word;
+                    } else {
+                        const wrongSpan = document.createElement('span');
+                        wrongSpan.className = 'diff-wrong mr-1';
+                        wrongSpan.textContent = item.word;
+                        
+                        const expectedSpan = document.createElement('span');
+                        expectedSpan.className = 'diff-expected';
+                        expectedSpan.textContent = `[${item.expected}]`;
+                        
+                        span.appendChild(wrongSpan);
+                        span.appendChild(expectedSpan);
+                    }
+                    diffContainer.appendChild(span);
+                });
+            }
+            
+            if(data.accuracy === 100) {
+                confetti({ particleCount: 200, spread: 100, origin: { y: 0.6 } });
+            }
+        }
+    </script>
+</body>
+</html>

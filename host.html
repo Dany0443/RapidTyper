@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Host Control</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        :root {
+            --bg: #323437;
+            --main: #e2b714;
+            --sub: #646669;
+            --text: #d1d0c5;
+            --error: #ca4754;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Roboto Mono', monospace;
+            overflow-x: hidden;
+        }
+
+        .screen {
+            display: none;
+            opacity: 0;
+            transform: scale(0.98);
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+        
+        .screen.active {
+            display: block;
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .btn {
+            background: transparent;
+            color: var(--sub);
+            border: 2px solid var(--sub);
+            padding: 0.75rem 2rem;
+            border-radius: 0.5rem;
+            transition: all 0.2s;
+            cursor: pointer;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .btn:hover:not(:disabled) {
+            color: var(--text);
+            border-color: var(--text);
+            transform: translateY(-2px);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            color: var(--main);
+            border-color: var(--main);
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: var(--main);
+            color: var(--bg);
+        }
+
+        .input-ui {
+            background: rgba(0,0,0,0.2);
+            border: 2px solid var(--sub);
+            color: var(--text);
+            padding: 1rem;
+            outline: none;
+            border-radius: 0.5rem;
+            width: 100%;
+            transition: border-color 0.2s;
+        }
+        .input-ui:focus { border-color: var(--main); }
+
+        .player-card {
+            background: #2c2e31;
+            border-radius: 8px;
+            padding: 1rem;
+            border-left: 4px solid var(--sub);
+            transition: all 0.3s ease;
+        }
+
+        .player-card.finished {
+            border-left-color: var(--main);
+            background: rgba(226, 183, 20, 0.05);
+        }
+
+        .progress-track {
+            background: #111;
+            height: 6px;
+            border-radius: 3px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: var(--main);
+            width: 0%;
+            transition: width 0.5s linear;
+        }
+
+        .podium-container {
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            gap: 1rem;
+            height: 300px;
+            margin-bottom: 2rem;
+        }
+
+        .podium-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-end;
+            width: 140px;
+            transition: height 1s ease;
+        }
+
+        .podium-block {
+            width: 100%;
+            background: linear-gradient(to bottom, var(--main), #b8930c);
+            border-radius: 8px 8px 0 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3rem;
+            font-weight: bold;
+            color: var(--bg);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+        }
+
+        .rank-1 { height: 250px; order: 2; }
+        .rank-2 { height: 180px; order: 1; }
+        .rank-2 .podium-block { background: linear-gradient(to bottom, #c0c0c0, #909090); }
+        .rank-3 { height: 130px; order: 3; }
+        .rank-3 .podium-block { background: linear-gradient(to bottom, #cd7f32, #a05a2c); }
+
+        .crown { font-size: 2rem; margin-bottom: 10px; animation: bounce 2s infinite; }
+        @keyframes bounce { 0%, 100% {transform: translateY(0);} 50% {transform: translateY(-10px);} }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .results-table th {
+            text-align: left;
+            padding: 1rem;
+            color: var(--sub);
+            border-bottom: 2px solid #444;
+            font-size: 0.875rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .results-table td {
+            padding: 1rem;
+            border-bottom: 1px solid #333;
+            vertical-align: middle;
+        }
+        .results-table tr:hover {
+            background: rgba(255,255,255,0.02);
+        }
+        .results-table th:first-child,
+        .results-table td:first-child {
+            padding-left: 1.5rem;
+        }
+        
+        /* FIXED: Proper alignment for numeric columns */
+        .results-table th.text-right,
+        .results-table td.text-right {
+            text-align: right;
+        }
+        
+        .results-table th:last-child,
+        .results-table td:last-child {
+            padding-right: 1.5rem;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col p-6">
+
+    <header class="flex justify-between items-center mb-8 border-b border-gray-700 pb-4">
+        <div class="flex items-center gap-4">
+            <i class="fa-solid fa-crown text-4xl" style="color: var(--main)"></i>
+            <div>
+                <h1 class="text-2xl font-bold">HOST <span style="color: var(--main)">PANEL</span></h1>
+                <div class="flex items-center gap-2 text-sm text-gray-500">
+                    <div id="status-dot" class="w-2 h-2 rounded-full bg-red-500"></div>
+                    <span id="status-text">Disconnected</span>
+                </div>
+            </div>
+        </div>
+        <div class="flex gap-2">
+            <button onclick="logout()" id="logout-btn" class="btn text-sm" style="display: none;"><i class="fa-solid fa-sign-out-alt"></i> Logout</button>
+            <button onclick="location.reload()" class="btn text-sm"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+        </div>
+    </header>
+
+    <main class="flex-1 max-w-7xl mx-auto w-full">
+
+        <div id="auth-screen" class="screen active max-w-md mx-auto mt-20 text-center">
+            <h2 class="text-3xl font-bold mb-8">Admin Access</h2>
+            <div class="bg-gray-800 p-8 rounded-xl shadow-2xl border border-gray-700">
+                <p class="text-gray-400 mb-4">Enter the Host Key to manage the event.</p>
+                <input type="password" id="host-key" class="input-ui mb-6 text-center text-xl" placeholder="••••" onkeydown="if(event.key==='Enter') login()">
+                <button onclick="login()" class="btn btn-primary w-full py-3">LOGIN</button>
+            </div>
+        </div>
+
+        <div id="lobby-screen" class="screen">
+            <!-- Navigation Tabs -->
+            <div class="flex justify-center gap-4 mb-8">
+                <button onclick="switchView('fast-typer')" id="tab-fast-typer" class="btn btn-primary px-6 py-2 rounded-full transition-all scale-110 shadow-lg">
+                    <i class="fa-solid fa-keyboard mr-2"></i> Fast Typer
+                </button>
+                <button onclick="switchView('spelling-bee')" id="tab-spelling-bee" class="btn px-6 py-2 rounded-full transition-all border border-gray-600 hover:bg-gray-800">
+                    <i class="fa-solid fa-spell-check mr-2"></i> Spelling Bee
+                </button>
+            </div>
+
+            <!-- Fast Typer View -->
+            <div id="view-fast-typer">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 flex flex-col justify-between">
+                        <div>
+                            <h3 class="text-gray-400 text-xs font-bold uppercase mb-1">Game Status</h3>
+                            <div id="game-state-text" class="text-2xl font-bold text-green-400">LOBBY OPEN</div>
+                        </div>
+                        <div class="mt-4">
+                            <h3 class="text-gray-400 text-xs font-bold uppercase mb-1">Players Ready</h3>
+                            <div class="text-4xl font-bold text-white"><span id="player-count" style="color: var(--main)">0</span></div>
+                        </div>
+                    </div>
+
+                    <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 md:col-span-2 flex gap-4">
+                        <div class="flex-1">
+                            <h3 class="text-gray-400 text-xs font-bold uppercase mb-2">Competition Text</h3>
+                            <textarea id="game-text" class="w-full h-24 bg-gray-900 border border-gray-600 rounded p-2 text-sm text-gray-300 resize-none font-mono"></textarea>
+                        </div>
+                        <div class="flex flex-col justify-end">
+                            <button onclick="updateText()" class="btn h-12 w-32"><i class="fa-solid fa-save"></i> Save</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center mb-4 bg-gray-800 p-4 rounded-xl border border-gray-700">
+                    <div class="flex gap-2">
+                        <button onclick="filterGrade('all')" class="btn text-xs py-1">All</button>
+                        <button onclick="filterGrade('1-4')" class="btn text-xs py-1">1-4</button>
+                        <button onclick="filterGrade('5-9')" class="btn text-xs py-1">5-9</button>
+                        <button onclick="filterGrade('10-12')" class="btn text-xs py-1">10-12</button>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span id="round-status-badge" class="text-sm font-bold px-3 py-1 rounded font-mono" style="background:rgba(226,183,20,0.15);color:var(--main);letter-spacing:1px;">Runda 1 / 3</span>
+                        <button onclick="nextRound()" id="next-round-btn" class="btn btn-primary text-sm px-4 shadow-lg" style="display:none;">
+                            <i class="fa-solid fa-forward-step"></i> Runda Urm.
+                        </button>
+                        <button onclick="endSeries()" id="end-series-btn" class="btn text-sm px-4" style="display:none;border-color:#ef4444;color:#ef4444;">
+                            <i class="fa-solid fa-flag-checkered"></i> Termină Seria
+                        </button>
+                        <button onclick="startGame()" id="start-btn" class="btn btn-primary text-lg px-8 shadow-lg shadow-yellow-900/20" disabled>
+                            <i class="fa-solid fa-play"></i> START RUNDA 1
+                        </button>
+                    </div>
+                </div>
+
+                <div id="player-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 h-[500px] overflow-y-auto pr-2 pb-10">
+                </div>
+            </div>
+
+            <!-- Spelling Bee View -->
+            <div id="view-spelling-bee" style="display: none;">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 flex flex-col justify-between">
+                        <div>
+                            <h3 class="text-gray-400 text-xs font-bold uppercase mb-1">Spelling Status</h3>
+                            <div class="text-2xl font-bold text-yellow-500">ACTIVE</div>
+                        </div>
+                        <div class="mt-4">
+                            <h3 class="text-gray-400 text-xs font-bold uppercase mb-1">Online Spellers</h3>
+                            <div class="text-4xl font-bold text-white"><span id="speller-count" style="color: var(--main)">0</span></div>
+                        </div>
+                    </div>
+
+                    <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 md:col-span-2 flex gap-4">
+                        <div class="flex-1">
+                            <h3 class="text-gray-400 text-xs font-bold uppercase mb-2">Dictation Text</h3>
+                            <textarea id="spell-text" class="w-full h-24 bg-gray-900 border border-gray-600 rounded p-2 text-sm text-gray-300 resize-none font-mono"></textarea>
+                        </div>
+                        <div class="flex justify-between items-center mb-6 bg-gray-800 p-4 rounded-xl border border-gray-700">
+                            <div class="flex gap-4">
+                                <button onclick="startSpellGame()" id="start-spell-btn" class="btn btn-primary text-lg px-6 shadow-lg shadow-yellow-900/20">
+                                    <i class="fa-solid fa-play"></i> START RACE
+                                </button>
+                                <button onclick="stopSpellGame()" id="stop-spell-btn" class="btn bg-red-600 text-white text-lg px-6 hover:bg-red-700 border-red-800">
+                                    <i class="fa-solid fa-stop"></i> STOP RACE
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 mb-6">
+                    <h3 class="text-xl font-bold text-main mb-4"><i class="fa-solid fa-list"></i> Connected Spellers</h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse">
+                            <thead>
+                                <tr class="border-b border-gray-700 text-gray-400">
+                                    <th class="p-3">Name</th>
+                                    <th class="p-3">Grade</th>
+                                    <th class="p-3">Status</th>
+                                    <th class="p-3 text-right">Score</th>
+                                </tr>
+                            </thead>
+                            <tbody id="spellers-table-body">
+                                <tr><td colspan="4" class="p-4 text-center text-gray-500">Waiting for spellers...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 mb-8">
+                    <div class="flex justify-between items-center mb-6">
+                        <h3 class="text-xl font-bold text-white"><i class="fa-solid fa-spell-check text-yellow-500"></i> Live Monitoring</h3>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div>
+                            <h4 class="text-xs text-gray-500 uppercase mb-2">Live Log</h4>
+                            <div id="spell-log" class="text-sm text-gray-400 h-96 overflow-y-auto bg-black p-2 rounded border border-gray-700 font-mono">
+                                <div class="text-gray-600 italic">Waiting for submissions...</div>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 class="text-xs text-gray-500 uppercase mb-2">Speller Progress</h4>
+                            <div id="spellers-list" class="text-sm text-gray-400 h-96 overflow-y-auto bg-black p-2 rounded border border-gray-700">
+                                <div class="text-gray-600 italic">No spellers connected...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="race-screen" class="screen">
+            <div class="flex justify-between items-center mb-8">
+                <div>
+                    <h2 class="text-4xl font-bold">Race Live</h2>
+                    <p class="text-gray-500">Monitoring progress...</p>
+                </div>
+                <div class="text-right">
+                    <div class="text-sm text-gray-500">Time Remaining</div>
+                    <div id="race-timer" class="text-5xl font-mono font-bold text-white">20</div>
+                </div>
+            </div>
+
+            <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+                <div class="p-4 bg-gray-900 border-b border-gray-700 grid grid-cols-12 gap-4 text-sm font-bold text-gray-400">
+                    <div class="col-span-1">#</div>
+                    <div class="col-span-3">Player</div>
+                    <div class="col-span-2">Grade</div>
+                    <div class="col-span-4">Progress</div>
+                    <div class="col-span-2 text-right">WPM</div>
+                </div>
+                <div id="live-list" class="h-[600px] overflow-y-auto">
+                </div>
+            </div>
+        </div>
+
+        <div id="results-screen" class="screen">
+            <div class="text-center mb-12">
+                <h2 class="text-5xl font-bold mb-4 text-white">Race Finished</h2>
+                <!-- round controls moved to lobby -->
+            </div>
+
+            <div id="podium-area" class="podium-container">
+            </div>
+
+            <div class="bg-gray-800 rounded-xl overflow-hidden shadow-2xl">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 80px;">Rank</th>
+                            <th style="width: 200px;">Name</th>
+                            <th style="width: 100px;">Grade</th>
+                            <th style="width: 120px;" class="text-right">WPM</th>
+                            <th style="width: 120px;" class="text-right">Accuracy</th>
+                            <th style="width: 140px;" class="text-right">Consistency</th>
+                            <th style="width: 100px;" class="text-right">Errors</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-body">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        const HOST = location.hostname || "localhost";
+        const WS_URL = "ws://localhost:5889";
+        const LS_HOST_SESSION = "mt_host_session";
+        
+        let ws;
+        let allPlayers = [];
+        let currentFilter = 'all';
+        let raceActive = false;
+        let raceDuration = 20; // Issue #16: matches server GAME_DURATION
+        let isAuthenticated = false;
+        let currentRound = 0;
+        let maxRounds = 3;
+        let phase = 'LOBBY';
+
+        function switchView(view) {
+            document.getElementById('view-fast-typer').style.display = view === 'fast-typer' ? 'block' : 'none';
+            document.getElementById('view-spelling-bee').style.display = view === 'spelling-bee' ? 'block' : 'none';
+            
+            // Update button styles
+            const btnFast = document.getElementById('tab-fast-typer');
+            const btnSpell = document.getElementById('tab-spelling-bee');
+            
+            if (view === 'fast-typer') {
+                btnFast.className = 'btn btn-primary px-6 py-2 rounded-full transition-all scale-110 shadow-lg';
+                btnSpell.className = 'btn px-6 py-2 rounded-full transition-all border border-gray-600 hover:bg-gray-800';
+            } else {
+                btnSpell.className = 'btn btn-primary px-6 py-2 rounded-full transition-all scale-110 shadow-lg';
+                btnFast.className = 'btn px-6 py-2 rounded-full transition-all border border-gray-600 hover:bg-gray-800';
+            }
+            
+            // Notify server of mode change
+            if(ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                    type: 'SET_GAME_MODE', 
+                    mode: view === 'fast-typer' ? 'race' : 'spell' 
+                }));
+            }
+        }
+
+        window.onload = () => {
+            const session = localStorage.getItem(LS_HOST_SESSION);
+            if(session) {
+                document.getElementById('logout-btn').style.display = 'block';
+            }
+            connect();
+        };
+
+        function connect() {
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                document.getElementById('status-dot').className = "w-2 h-2 rounded-full bg-green-500";
+                document.getElementById('status-text').textContent = "Connected";
+                document.getElementById('status-text').className = "text-green-500";
+                
+                const session = localStorage.getItem(LS_HOST_SESSION);
+                if(session) {
+                    const key = JSON.parse(session).key;
+                    ws.send(JSON.stringify({ type: 'ADMIN_LOGIN', key: key }));
+                }
+                
+                // Request full state sync including spellers
+                ws.send(JSON.stringify({ type: 'GET_HOST_STATE' }));
+                ws.send(JSON.stringify({ type: 'REQUEST_SPELLER_SYNC' }));
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleMessage(data);
+                
+                if (data.type === 'SYNC_STATE') {
+                    if (data.spellRoundActive) {
+                        switchView('spelling-bee');
+                        document.getElementById('start-spell-btn').disabled = true;
+                        document.getElementById('start-spell-btn').innerHTML = '<i class="fa-solid fa-check"></i> RUNNING';
+                    }
+                }
+                
+                if (data.type === 'UPDATE_SPELLERS') {
+                    renderSpellersList(data.list);
+                    document.getElementById('speller-count').innerText = data.count || 0;
+                }
+            };
+
+            ws.onclose = () => {
+                document.getElementById('status-dot').className = "w-2 h-2 rounded-full bg-red-500";
+                document.getElementById('status-text').textContent = "Disconnected";
+                document.getElementById('status-text').className = "text-red-500";
+                setTimeout(connect, 3000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+            };
+        }
+
+function updateSpellText() {
+    const txt = document.getElementById('spell-text').value;
+    if(!txt || txt.trim().length === 0) {
+        alert("Text cannot be empty");
+        return;
+    }
+    if(ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ 
+            type: 'UPDATE_TEXT', 
+            text: txt,
+            mode: 'spell'
+        }));
+    } else {
+        alert("Not connected to server");
+    }
+}
+
+// ADD AUTO-SAVE LISTENER
+document.addEventListener('DOMContentLoaded', () => {
+    const spellTextarea = document.getElementById('spell-text');
+    
+    // Auto-save on input
+    spellTextarea.addEventListener('input', () => {
+        updateSpellText();
+    });
+    
+    // Save on Enter key
+    spellTextarea.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.key === 'Enter') {
+            e.preventDefault();
+            updateSpellText();
+        }
+    });
+});
+
+// spell
+
+function startSpellRound() {
+    if(confirm("Start dictation round? All spellers will see the input box.")) {
+        // Clear log
+        document.getElementById('spell-log').innerHTML = `<div class="text-yellow-500">Dictation Round Started</div>`;
+        
+        ws.send(JSON.stringify({ 
+            type: 'HOST_START_WORD', 
+            word: 'START_DICTATION' // Special signal
+        }));
+    }
+}
+
+// Update your existing onmessage in host.html to handle live updates:
+ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if(data.type === 'SPELL_LIVE_UPDATE') {
+        const log = document.getElementById('spell-log');
+        const color = data.correct ? 'text-green-400' : 'text-red-400';
+        const icon = data.correct ? '✓' : '✗';
+        log.innerHTML = `<div class="${color} border-b border-gray-800 py-1">${icon} <b>${data.user}</b>: ${data.correct ? 'Correct' : 'Wrong'}</div>` + log.innerHTML;
+    }
+
+    if(data.type === 'SPELL_LOBBY_UPDATE') {
+        document.getElementById('speller-count').textContent = data.count;
+        if(data.spellers) {
+            const list = document.getElementById('spellers-list');
+            if(data.spellers.length === 0) {
+                list.innerHTML = '<div class="text-gray-600 italic">No spellers connected</div>';
+            } else {
+                list.innerHTML = data.spellers.map(s => 
+                    `<div class="flex justify-between py-1 border-b border-gray-800">
+                        <span class="text-white">${s.username}</span>
+                        <span class="text-yellow-500 font-bold">${s.score} pts</span>
+                    </div>`
+                ).join('');
+            }
+        }
+    }
+};
+
+function startSpellGame() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('Not connected to server!');
+        return;
+    }
+
+    // Sends the command to server.js to trigger 'SPELL_START' for clients
+    ws.send(JSON.stringify({ 
+        type: 'START_SPELL_ROUND' 
+    }));
+
+    // Visual feedback for the button
+    const btn = document.getElementById('start-spell-btn');
+    const originalContent = btn.innerHTML;
+    
+    btn.innerHTML = '<i class="fa-solid fa-check"></i> Started';
+    btn.disabled = true;
+
+    // Re-enable button after 3 seconds
+    setTimeout(() => {
+        btn.innerHTML = originalContent;
+        btn.disabled = false;
+    }, 3000);
+}
+
+
+        function handleMessage(data) {
+            switch(data.type) {
+
+                case 'UPDATE_SPELLERS':
+                    const spellerCount = data.count || 0;
+                    const spellersList = data.list || [];
+                    
+                    document.getElementById('speller-count').innerText = spellerCount;
+                    renderSpellersList(spellersList);
+                    
+                    debugLog(`Spellers updated: ${spellerCount} online`);
+                break;
+
+                case 'HOST_STATE_SYNC':
+                    if (data.mode === 'spell') {
+                        switchView('spelling-bee');
+                        if(data.currentSpellText) {
+                             document.getElementById('spell-text').value = data.currentSpellText;
+                        }
+                    } else {
+                        switchView('fast-typer');
+                    }
+                    break;
+                case 'AUTH_SUCCESS':
+                    isAuthenticated = true;
+                    document.getElementById('logout-btn').style.display = 'block';
+                    if(data.currentText)     document.getElementById('game-text').value  = data.currentText;
+                    if(data.currentSpellText) document.getElementById('spell-text').value = data.currentSpellText;
+                    if(data.gameState?.currentRound) { currentRound = data.gameState.currentRound; maxRounds = data.gameState.maxRounds || 3; }
+                    phase = data.gameState?.phase || 'LOBBY';
+                    updateRoundUI();
+                    showScreen('lobby-screen');
+                    break;
+                case 'AUTH_FAIL':
+                    localStorage.removeItem(LS_HOST_SESSION);
+                    isAuthenticated = false;
+                    showScreen('auth-screen');
+                    alert("Incorrect Host Key");
+                    break;
+                case 'TEXT_UPDATE_SUCCESS':
+                    alert("✅ Text updated and saved successfully!");
+                    break;
+                case 'TEXT_UPDATE_PARTIAL':
+                    alert("⚠️ Text updated but failed to save to file. Changes will be lost on server restart.");
+                    break;
+                case 'UPDATE_LOBBY':
+                    allPlayers = data.players || [];
+                    updateUI();
+                    break;
+                case 'START_GAME':
+                    raceDuration = data.duration || 60;
+                    if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
+                    phase = 'RACING';
+                    updateRoundUI();
+                    startRaceUI();
+                    break;
+                case 'GAME_OVER':
+                    if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
+                    phase = 'ROUND_END';
+                    updateRoundUI();
+                    finishGameUI();
+                    break;
+                case 'SERIES_COMPLETE':
+                    phase = 'ROUND_END';
+                    currentRound = data.round || maxRounds;
+                    updateRoundUI();
+                    finishGameUI();
+                    break;
+                case 'SERIES_OVER':
+                case 'FORCE_RESET':
+                    currentRound = 0; phase = 'LOBBY';
+                    updateRoundUI();
+                    showScreen('lobby-screen');
+                    break;
+            }
+        }
+
+
+    function stopSpellGame() {
+    if (!ws) return;
+    if(confirm('Are you sure you want to FORCE STOP the race?')) {
+        ws.send(JSON.stringify({ type: 'STOP_SPELL_ROUND' }));
+        
+        // Reset UI
+        const btn = document.getElementById('start-spell-btn');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-play"></i> START SPELLING BEE';
+    }
+}
+
+function renderSpellersList(list) {
+    const tbody = document.getElementById('spellers-table-body');
+    if (!list || list.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="p-4 text-center text-gray-500">No spellers connected</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = list.map(p => `
+        <tr class="border-b border-gray-700/50 hover:bg-gray-700/30 transition">
+            <td class="p-3 font-bold text-white">${p.username}</td>
+            <td class="p-3 text-gray-400">${p.grade}</td>
+            <td class="p-3">
+                <span class="px-2 py-1 rounded text-xs font-bold ${p.status === 'connected' ? 'bg-green-900 text-green-200' : 'bg-blue-900 text-blue-200'}">
+                    ${p.status || 'Ready'}
+                </span>
+            </td>
+            <td class="p-3 text-right font-mono text-yellow-500">${p.score || 0}</td>
+        </tr>
+    `).join('');
+}
+
+        function login() {
+            const key = document.getElementById('host-key').value;
+            if(!key) {
+                alert("Please enter a host key");
+                return;
+            }
+            
+            localStorage.setItem(LS_HOST_SESSION, JSON.stringify({ key: key }));
+            
+            if(ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ADMIN_LOGIN', key: key }));
+            }
+        }
+
+        function logout() {
+            localStorage.removeItem(LS_HOST_SESSION);
+            location.reload();
+        }
+
+        function updateText() {
+            const txt = document.getElementById('game-text').value;
+            if(!txt || txt.trim().length === 0) {
+                alert("Text cannot be empty");
+                return;
+            }
+            if(ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'UPDATE_TEXT', text: txt }));
+            } else {
+                alert("Not connected to server");
+            }
+        }
+
+        function updateRoundUI() {
+            const badge = document.getElementById('round-status-badge');
+            const nextBtn = document.getElementById('next-round-btn');
+            const endBtn = document.getElementById('end-series-btn');
+            const startBtn = document.getElementById('start-btn');
+
+            if (!badge) return;
+
+            if (currentRound === 0) {
+                badge.textContent = `Runda 1 / ${maxRounds}`;
+                badge.style.background = 'rgba(226,183,20,0.15)';
+                if (nextBtn) nextBtn.style.display = 'none';
+                if (endBtn)  endBtn.style.display  = 'none';
+                if (startBtn) startBtn.disabled = allPlayers.length === 0;
+            } else if (phase === 'ROUND_END') {
+                const isLast = currentRound >= maxRounds;
+                badge.textContent = isLast
+                    ? `Runda ${currentRound}/${maxRounds} — SERIE COMPLETĂ`
+                    : `Runda ${currentRound}/${maxRounds} — gata`;
+                badge.style.background = isLast ? 'rgba(34,197,94,0.15)' : 'rgba(226,183,20,0.15)';
+                if (nextBtn) nextBtn.style.display = isLast ? 'none' : 'inline-flex';
+                if (endBtn)  endBtn.style.display  = 'inline-flex';
+                if (startBtn) startBtn.style.display = 'none';
+            } else {
+                badge.textContent = `Runda ${currentRound} / ${maxRounds}`;
+                if (nextBtn) nextBtn.style.display = 'none';
+                if (endBtn)  endBtn.style.display  = 'none';
+                if (startBtn) startBtn.style.display = 'inline-flex';
+            }
+        }
+
+        function nextRound() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (confirm(`Start Runda ${currentRound + 1} / ${maxRounds}?`)) {
+                ws.send(JSON.stringify({ type: 'NEXT_ROUND' }));
+            }
+        }
+
+        function endSeries() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (confirm('Termini seria și resetezi la LOBBY?')) {
+                ws.send(JSON.stringify({ type: 'END_SERIES' }));
+            }
+        }
+
+        function startGame() {
+            if(confirm(`Start race for ${allPlayers.length} players?`)) {
+                if(ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'START_REQUEST' }));
+                }
+            }
+        }
+
+        function filterGrade(g) {
+            currentFilter = g;
+            updateUI();
+        }
+
+        function updateUI() {
+            document.getElementById('player-count').textContent = allPlayers.length;
+            const startBtn = document.getElementById('start-btn');
+            if (startBtn) startBtn.disabled = allPlayers.length === 0;
+            updateRoundUI();
+
+            let displayList = allPlayers;
+            if(currentFilter !== 'all') {
+                displayList = allPlayers.filter(p => p.grade === currentFilter);
+            }
+            
+            displayList.sort((a,b) => b.wpm - a.wpm);
+
+            if(raceActive) {
+                renderLiveList(displayList);
+            } else {
+                renderLobbyGrid(displayList);
+            }
+        }
+
+        function renderLobbyGrid(list) {
+            const grid = document.getElementById('player-grid');
+            grid.innerHTML = list.map(p => `
+                <div class="player-card ${p.finished ? 'finished' : ''}">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <div class="font-bold text-white text-lg truncate w-32">${p.username || 'Guest'}</div>
+                            <div class="text-xs text-gray-500">${p.grade || 'N/A'}</div>
+                        </div>
+                        ${p.finished ? '<i class="fa-solid fa-flag-checkered text-green-500"></i>' : '<i class="fa-regular fa-keyboard text-gray-600"></i>'}
+                    </div>
+                    <div class="mt-4 flex justify-between items-end">
+                        <div class="text-2xl font-bold text-white">${p.wpm || 0} <span class="text-xs text-gray-500 font-normal">WPM</span></div>
+                        <div class="text-sm ${(p.acc || 0) >= 95 ? 'text-green-400' : 'text-yellow-400'}">${p.acc || 0}%</div>
+                    </div>
+                    <div class="progress-track">
+                        <div class="progress-bar" style="width: ${p.progress || 0}%"></div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderLiveList(list) {
+            const container = document.getElementById('live-list');
+            container.innerHTML = list.map((p, i) => `
+                <div class="p-4 border-b border-gray-800 grid grid-cols-12 gap-4 items-center hover:bg-gray-800/50 transition">
+                    <div class="col-span-1 font-bold text-gray-500">#${i+1}</div>
+                    <div class="col-span-3 font-bold text-white truncate">${p.username || 'Guest'}</div>
+                    <div class="col-span-2 text-xs text-gray-400">${p.grade || 'N/A'}</div>
+                    <div class="col-span-4">
+                        <div class="w-full bg-gray-700 h-2 rounded-full overflow-hidden">
+                            <div class="bg-yellow-500 h-full transition-all duration-300" style="width: ${p.progress || 0}%"></div>
+                        </div>
+                    </div>
+                    <div class="col-span-2 text-right font-mono font-bold text-xl text-yellow-500">${p.wpm || 0}</div>
+                </div>
+            `).join('');
+        }
+
+        function startRaceUI() {
+            raceActive = true;
+            showScreen('race-screen');
+            let t = raceDuration;
+            const timerEl = document.getElementById('race-timer');
+            timerEl.textContent = t;
+            
+            const int = setInterval(() => {
+                t--;
+                timerEl.textContent = t;
+                if(t <= 0 || !raceActive) clearInterval(int);
+            }, 1000);
+        }
+
+        function finishGameUI() {
+            raceActive = false;
+            showScreen('results-screen');
+            renderResults();
+            // Show round controls back in lobby context
+            setTimeout(updateRoundUI, 300);
+        }
+
+        function renderResults() {
+            const sorted = [...allPlayers].sort((a,b) => (b.wpm || 0) - (a.wpm || 0));
+            const top3 = sorted.slice(0, 3);
+            
+            const pod = document.getElementById('podium-area');
+            pod.innerHTML = '';
+            
+            const styles = [
+                { class: 'rank-1', crown: '🥇', label: '1st' },
+                { class: 'rank-2', crown: '🥈', label: '2nd' },
+                { class: 'rank-3', crown: '🥉', label: '3rd' }
+            ];
+
+            const podiumOrder = [1, 0, 2]; 
+            
+            podiumOrder.forEach(idx => {
+                if(top3[idx]) {
+                    const p = top3[idx];
+                    const s = styles[idx];
+                    pod.innerHTML += `
+                        <div class="podium-step ${s.class}">
+                            <div class="crown">${s.crown}</div>
+                            <div class="text-center mb-2">
+                                <div class="font-bold text-white truncate w-32">${p.username || 'Guest'}</div>
+                                <div class="text-xs text-gray-400">${p.wpm || 0} WPM</div>
+                            </div>
+                            <div class="podium-block">${s.label}</div>
+                        </div>
+                    `;
+                }
+            });
+
+            const tbody = document.getElementById('results-body');
+            tbody.innerHTML = sorted.map((p, i) => `
+                <tr>
+                    <td class="font-bold text-gray-400 text-lg">#${i+1}</td>
+                    <td class="font-bold text-white text-lg">${p.username || 'Guest'}</td>
+                    <td class="text-gray-400">${p.grade || 'N/A'}</td>
+                    <td class="text-right font-mono text-yellow-500 font-bold text-2xl">${p.wpm || 0}</td>
+                    <td class="text-right text-gray-300 text-lg">${p.acc || 0}%</td>
+                    <td class="text-right text-blue-400 text-lg">${p.consistency || 0}%</td>
+                    <td class="text-right text-red-400 font-bold text-lg">${p.errors || 0}</td>
+                </tr>
+            `).join('');
+        }
+
+        function showScreen(id) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            setTimeout(() => {
+                document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
+                const target = document.getElementById(id);
+                target.style.display = 'block';
+                setTimeout(() => target.classList.add('active'), 50);
+            }, 200);
+        }
+    </script>
+</body>
+</html>

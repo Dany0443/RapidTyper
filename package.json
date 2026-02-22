@@ -1,0 +1,19 @@
+{
+  "name": "monkey-event-pro",
+  "version": "2.0.0",
+  "description": "Professional Typing Event Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "sqlite3": "^5.0.2",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "tailwindcss": "^4.1.18"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
