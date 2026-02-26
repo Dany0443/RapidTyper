@@ -29,15 +29,16 @@
         .screen {
             display: none;
             opacity: 0;
-            transform: scale(0.98);
-            transition: opacity 0.3s ease, transform 0.3s ease;
+            transform: translateY(10px); /* Changed from scale to a subtle slide */
+            transition: opacity 0.4s ease, transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
         }
-        
+
         .screen.active {
             display: block;
             opacity: 1;
-            transform: scale(1);
+            transform: translateY(0);
         }
+
 
         .btn {
             background: transparent;
@@ -54,10 +55,11 @@
             gap: 0.5rem;
         }
 
+        /* Tone down button hover */
         .btn:hover:not(:disabled) {
             color: var(--text);
             border-color: var(--text);
-            transform: translateY(-2px);
+            transform: translateY(-1px); /* Reduced from -2px */
         }
 
         .btn:disabled {
@@ -286,17 +288,19 @@
 
             <!-- Spelling Bee View -->
             <div id="view-spelling-bee" style="display: none;">
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                    <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 flex flex-col justify-between">
-                        <div>
-                            <h3 class="text-gray-400 text-xs font-bold uppercase mb-1">Spelling Status</h3>
-                            <div class="text-2xl font-bold text-yellow-500">ACTIVE</div>
-                        </div>
-                        <div class="mt-4">
-                            <h3 class="text-gray-400 text-xs font-bold uppercase mb-1">Online Spellers</h3>
-                            <div class="text-4xl font-bold text-white"><span id="speller-count" style="color: var(--main)">0</span></div>
-                        </div>
-                    </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                    <h3 class="text-gray-400 text-xs font-bold uppercase mb-1">Spelling Status</h3>
+                    <div class="text-2xl font-bold text-yellow-500">ACTIVE</div>
+                </div>
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                    <h3 class="text-gray-400 text-xs font-bold uppercase mb-1">Online Spellers</h3>
+                    <div class="text-4xl font-bold text-white" id="speller-count">0</div>
+                </div>
+            </div>
+            <div id="speller-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 h-[500px] overflow-y-auto">
+                </div>
+            </div>
 
                     <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 md:col-span-2 flex gap-4">
                         <div class="flex-1">

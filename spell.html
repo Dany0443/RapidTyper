@@ -220,6 +220,15 @@
             </div>
         </div>
 
+        <div class="fixed bottom-4 left-4 z-50 flex items-center gap-2 opacity-70 hover:opacity-100 transition-opacity"> 
+    <i class="fa-solid fa-network-wired text-xs text-gray-500"></i> 
+    <span id="sync-indicator" class="text-xs text-gray-500 font-mono"></span> 
+        </div> 
+            <a href="https://github.com/Dany0443" target="_blank" rel="noopener noreferrer" class="fixed bottom-4 right-4 z-50 flex items-center gap-2 opacity-50 hover:opacity-100 transition-opacity cursor-pointer text-gray-500 hover:text-[#e2b714]"> 
+            <span class="text-xs font-mono hidden sm:inline">Created by Dany0443</span> 
+            <i class="fa-brands fa-github text-xl"></i> 
+            </a>
+
     </main>
 
     <script>
@@ -431,6 +440,8 @@
                     gradeButtons.classList.add('animate-shake');
                     setTimeout(() => gradeButtons.classList.remove('animate-shake'), 600);
                 }
+                // Add this line
+localStorage.setItem('fastTyper_session', JSON.stringify({ username, grade: selectedGrade }));
                 return;
             }
 
@@ -542,6 +553,16 @@
                 confetti({ particleCount: 200, spread: 100, origin: { y: 0.6 } });
             }
         }
+
+    window.addEventListener('load', () => {
+    const saved = localStorage.getItem('fastTyper_session');
+    if (saved) {
+        const data = JSON.parse(saved);
+        document.getElementById('username-input').value = data.username;
+        selectGrade(data.grade, document.querySelector(`.grade-btn[onclick*="${data.grade}"]`));
+        // Optional: Auto-click joinGame() if you want it to be instant
+    }
+    });
     </script>
 </body>
 </html>
