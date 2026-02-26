@@ -50,7 +50,7 @@ const FILES = {
 const wss = new WebSocket.Server({ port: 5889 });
 // Issue #15: Hardcoded admin key — load from env with fallback
 const ADMIN_KEY = process.env.ADMIN_KEY || "1313";
-const GAME_DURATION = 20;
+let GAME_DURATION = 60; // mutable — host can change via SET_DURATION
 const MAX_PLAYERS = 200; // Issue #20: Max player cap
 
 // ============ TIME SYNCHRONIZATION ============
@@ -880,6 +880,71 @@ async function handleMessage(ws, data) {
             break;
             }
 
+            case 'SET_DURATION': {
+                const durAdmin = gameState.state.players.get(ws);
+                if (durAdmin?.role === 'admin' && typeof data.duration === 'number') {
+                    GAME_DURATION = Math.max(10, Math.min(600, data.duration));
+                    sysLog(`⏱️ Game duration set to ${GAME_DURATION}s by host`);
+                }
+                break;
+            }
+
+            case 'KICK_PLAYER': {
+                const kickAdmin = gameState.state.players.get(ws);
+                if (kickAdmin?.role !== 'admin') break;
+                const targetUserId = data.userId;
+                let kicked = false;
+                for (let [socket, p] of gameState.state.players.entries()) {
+                    if (p.userId === targetUserId && p.role === 'player') {
+                        // Tell the client it was kicked — it will clear localStorage and reload
+                        try {
+                            socket.send(JSON.stringify({ type: 'KICKED' }));
+                        } catch(e) {}
+                        setTimeout(() => {
+                            try { socket.terminate(); } catch(e) {}
+                        }, 500);
+                        gameState.state.players.delete(socket);
+                        kicked = true;
+                        sysLog(`🦵 Kicked player: ${p.username}`);
+                        break;
+                    }
+                }
+                if (kicked) {
+                    broadcastLobbyState();
+                    // Notify host
+                    ws.send(JSON.stringify({ type: 'PLAYER_KICKED', userId: targetUserId }));
+                }
+                break;
+            }
+
+            case 'KICK_SPELLER': {
+                const kickSpellAdmin = gameState.state.players.get(ws);
+                if (kickSpellAdmin?.role !== 'admin') break;
+                const targetSpellId = data.userId;
+                let spellerKicked = false;
+                for (let [socket, p] of gameState.state.players.entries()) {
+                    if ((p.userId === targetSpellId || p.username === targetSpellId) && p.role === 'speller') {
+                        try {
+                            socket.send(JSON.stringify({ type: 'KICKED' }));
+                        } catch(e) {}
+                        setTimeout(() => {
+                            try { socket.terminate(); } catch(e) {}
+                        }, 500);
+                        gameState.state.players.delete(socket);
+                        spellerKicked = true;
+                        sysLog(`🦵 Kicked speller: ${p.username}`);
+                        break;
+                    }
+                }
+                if (spellerKicked) {
+                    broadcastSpellerState();
+                    ws.send(JSON.stringify({ type: 'PLAYER_KICKED', userId: targetSpellId }));
+                }
+                break;
+            }
+
+
+
 
 
 
@@ -1064,8 +1129,10 @@ async function handleJoin(ws, data) {
     }
 
     try {
+        await dbRunAsync(
             `INSERT OR REPLACE INTO users (id, username, grade) VALUES (?, ?, ?)`,
-            [userId, username, grade];
+            [userId, username, grade]
+        );
     } catch (err) {
         logger.error(`DB error on join: ${err.message}`);
     }

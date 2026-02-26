@@ -219,11 +219,6 @@
                 <button onclick="switchScreen('waiting-screen')" class="btn px-8">Back to Waiting Room</button>
             </div>
         </div>
-
-        <div class="fixed bottom-4 left-4 z-50 flex items-center gap-2 opacity-70 hover:opacity-100 transition-opacity"> 
-    <i class="fa-solid fa-network-wired text-xs text-gray-500"></i> 
-    <span id="sync-indicator" class="text-xs text-gray-500 font-mono"></span> 
-        </div> 
             <a href="https://github.com/Dany0443" target="_blank" rel="noopener noreferrer" class="fixed bottom-4 right-4 z-50 flex items-center gap-2 opacity-50 hover:opacity-100 transition-opacity cursor-pointer text-gray-500 hover:text-[#e2b714]"> 
             <span class="text-xs font-mono hidden sm:inline">Created by Dany0443</span> 
             <i class="fa-brands fa-github text-xl"></i> 
@@ -233,12 +228,12 @@
 
     <script>
         const WS_URL = "ws://localhost:5889";
-        const LS_USER = "mt_spell_user";   // separate key — never collides with racer (mt_user_data)
+        const LS_SESSION = "mt_session"; // same key as index.html — shared session
         const LS_SPELL_DRAFT = "mt_spell_draft";
         
         let reconnectAttempts = 0;
         let maxReconnectDelay = 30000;
-        let hasJoined = !!JSON.parse(localStorage.getItem(LS_USER) || 'null')?.userId;
+        let hasJoined = !!JSON.parse(localStorage.getItem(LS_SESSION) || 'null')?.userId;
         let currentRound = 0;
         let maxRounds = 3;
 
@@ -258,7 +253,7 @@
         };
 
         window.onload = () => {
-            const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+            const user = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
             if (user && user.username && user.grade) {
                 document.getElementById('username-input').value = user.username;
                 document.getElementById('display-name').textContent = user.username;
@@ -308,7 +303,7 @@
             document.getElementById('sync-indicator').textContent = 'Connected';
             reconnectAttempts = 0;
 
-                const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+                const user = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
                 if (user && user.userId && user.username) {
                     // Has saved session — auto-rejoin silently
                     hasJoined = true;
@@ -339,7 +334,7 @@
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
                 reconnectAttempts++;
                 document.getElementById('status-text').textContent = `Reconnecting in ${Math.floor(delay/1000)}s...`;
-                const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+                const user = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
                 if (!user?.userId) {
                     switchScreen('connecting-screen');
                 }
@@ -419,6 +414,13 @@
                     showFullResult(data);
                     break;
 
+                case 'KICKED':
+                    localStorage.removeItem(LS_SESSION);
+                    localStorage.removeItem(LS_SPELL_DRAFT);
+                    alert('You have been removed by the host.');
+                    location.reload();
+                    break;
+
                 case 'JOIN_SUCCESS':
                     switchScreen('waiting-screen');
                     document.getElementById('change-name-btn').style.display = 'block';
@@ -440,8 +442,6 @@
                     gradeButtons.classList.add('animate-shake');
                     setTimeout(() => gradeButtons.classList.remove('animate-shake'), 600);
                 }
-                // Add this line
-localStorage.setItem('fastTyper_session', JSON.stringify({ username, grade: selectedGrade }));
                 return;
             }
 
@@ -451,13 +451,13 @@ localStorage.setItem('fastTyper_session', JSON.stringify({ username, grade: sele
             }
             
             // Reuse existing userId if same name, otherwise generate new one
-            const existing = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+            const existing = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
             const userId = (existing && existing.username === name)
                 ? existing.userId
                 : 'sp_' + name.replace(/\s+/g, '_') + '_' + Date.now();
 
             const userData = { userId, username: name, grade: selectedGrade };
-            localStorage.setItem(LS_USER, JSON.stringify(userData));
+            localStorage.setItem(LS_SESSION, JSON.stringify(userData));
             localStorage.setItem('sb_grade', selectedGrade);
             document.getElementById('grade-display').textContent = selectedGrade;
             myData = userData;
@@ -476,7 +476,7 @@ localStorage.setItem('fastTyper_session', JSON.stringify({ username, grade: sele
         }
 
         function changeName() {
-            localStorage.removeItem(LS_USER);
+            localStorage.removeItem(LS_SESSION);
             localStorage.removeItem(LS_SPELL_DRAFT);
             location.reload();
         }
@@ -554,15 +554,6 @@ localStorage.setItem('fastTyper_session', JSON.stringify({ username, grade: sele
             }
         }
 
-    window.addEventListener('load', () => {
-    const saved = localStorage.getItem('fastTyper_session');
-    if (saved) {
-        const data = JSON.parse(saved);
-        document.getElementById('username-input').value = data.username;
-        selectGrade(data.grade, document.querySelector(`.grade-btn[onclick*="${data.grade}"]`));
-        // Optional: Auto-click joinGame() if you want it to be instant
-    }
-    });
     </script>
 </body>
 </html>

@@ -198,11 +198,6 @@
     </div>
     <div id="grade-indicator">Grade: <span id="grade-display">-</span></div>
 </div>
-
-    <div class="fixed bottom-4 left-4 z-50 flex items-center gap-2 opacity-70 hover:opacity-100 transition-opacity"> 
-    <i class="fa-solid fa-network-wired text-xs text-gray-500"></i> 
-    <span id="sync-indicator" class="text-xs text-gray-500 font-mono"></span> 
-    </div> 
         <a href="https://github.com/Dany0443" target="_blank" rel="noopener noreferrer" class="fixed bottom-4 right-4 z-50 flex items-center gap-2 opacity-50 hover:opacity-100 transition-opacity cursor-pointer text-gray-500 hover:text-[#e2b714]"> 
             <span class="text-xs font-mono hidden sm:inline">Created by Dany0443</span> 
             <i class="fa-brands fa-github text-xl"></i> 
@@ -213,7 +208,7 @@
 
     <script>
         const WS_URL = "ws://localhost:5889";
-        const LS_USER = "mt_user_data";
+        const LS_SESSION = "mt_session"; // shared key with spell.html
         
         let ws;
         let selectedGrade = null;
@@ -223,7 +218,7 @@
         let lastSyncTime = 0;
         let stateVersion = 0;
         // True if user has valid saved session data (previous OR current session)
-        let hasJoined = !!JSON.parse(localStorage.getItem(LS_USER) || 'null')?.userId;
+        let hasJoined = !!JSON.parse(localStorage.getItem(LS_SESSION) || 'null')?.userId;
         let currentRound = 0;
         let maxRounds = 3;
         
@@ -255,7 +250,7 @@
         };
 
         window.onload = () => {
-            const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+            const user = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
             if (user && user.username) {
                 document.getElementById('username-input').value = user.username;
                 if (user.grade) selectGrade(user.grade, null);
@@ -311,7 +306,7 @@
                 document.getElementById('status-dot').className = 'status-indicator status-green';
                 document.getElementById('status-text').textContent = 'Conectat';
                 
-                const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+                const user = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
                 if (user && user.userId && user.username) {
                     // Has saved session — auto-rejoin silently
                     hasJoined = true;
@@ -341,7 +336,7 @@
                 document.getElementById('status-text').textContent = `Reconnecting in ${Math.floor(delay/1000)}s...`;
                 
                 // Show connecting screen only if we have no user data at all
-                const user = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+                const user = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
                 if (!user?.userId) {
                     switchScreen('connecting-screen');
                 }
@@ -487,6 +482,13 @@
                     location.reload();
                     break;
                     
+                case 'KICKED':
+                    // Host kicked this player — clear session and go to login
+                    localStorage.removeItem(LS_SESSION);
+                    alert('You have been removed by the host.');
+                    location.reload();
+                    break;
+
                 case 'SERVER_SHUTDOWN':
                     alert(data.message);
                     document.getElementById('status-dot').className = 'status-indicator status-yellow';
@@ -513,8 +515,6 @@
             gradeButtons.classList.add('animate-shake');
             setTimeout(() => gradeButtons.classList.remove('animate-shake'), 600);
         }
-        
-        localStorage.setItem('fastTyper_session', JSON.stringify({ username, grade: selectedGrade }));
         return;
     }
 
@@ -526,13 +526,13 @@
     }
     
     // Reuse existing userId if same name, otherwise generate new one
-    const existing = JSON.parse(localStorage.getItem(LS_USER) || 'null');
+    const existing = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
     const userId = (existing && existing.username === name)
         ? existing.userId
         : 'u_' + name.replace(/\s+/g, '_') + '_' + Date.now();
 
     const userData = { userId, username: name, grade: selectedGrade };
-    localStorage.setItem(LS_USER, JSON.stringify(userData));
+    localStorage.setItem(LS_SESSION, JSON.stringify(userData));
     document.getElementById('grade-display').textContent = selectedGrade;
     document.getElementById('display-name').textContent = name;
     
@@ -547,7 +547,7 @@
 }
 
         function changeName() {
-            localStorage.removeItem(LS_USER);
+            localStorage.removeItem(LS_SESSION);
             location.reload();
         }
 
@@ -918,15 +918,7 @@
             }
         }, 15000);
 
-    window.addEventListener('load', () => {
-    const saved = localStorage.getItem('fastTyper_session');
-    if (saved) {
-        const data = JSON.parse(saved);
-        document.getElementById('username-input').value = data.username;
-        selectGrade(data.grade, document.querySelector(`.grade-btn[onclick*="${data.grade}"]`));
-        // Optional: Auto-click joinGame() if you want it to be instant
-    }
-    });        
+    
     </script>
 </body>
 </html>
