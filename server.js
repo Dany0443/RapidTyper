@@ -19,8 +19,7 @@ function debugLog(msg) {
 const DIRS = {
     logs: path.join(__dirname, 'logs'),
     db: path.join(__dirname, 'db'),
-    data: path.join(__dirname, 'data'),
-    backups: path.join(__dirname, 'backups')
+    data: path.join(__dirname, 'data')
 };
 
 // Create directories if they don't exist
@@ -185,7 +184,9 @@ class GameStateManager {
         };
         
         try {
-            await fs.promises.appendFile(FILES.stateLog, JSON.stringify(snapshot) + '\n');
+            // Write single record (overwrite) — prevents unbounded log growth.
+            // restoreLastState reads this one record directly.
+            await fs.promises.writeFile(FILES.stateLog, JSON.stringify(snapshot) + '\n');
         } catch (err) {
             sysLog(`❌ Snapshot error: ${err.message}`);
         }
@@ -195,11 +196,11 @@ class GameStateManager {
         try {
             if (!fs.existsSync(FILES.stateLog)) return false;
             
-            const content = await fs.promises.readFile(FILES.stateLog, 'utf8');
-            const lines = content.split('\n').filter(Boolean);
-            if (lines.length === 0) return false;
+            const fileContent = await fs.promises.readFile(FILES.stateLog, 'utf8');
+            const line = fileContent.trim();
+            if (!line) return false;
             
-            const lastSnapshot = JSON.parse(lines[lines.length - 1]);
+            const lastSnapshot = JSON.parse(line);
             
             // Issue #14: Restoring directly to RACING leaves no active timer and misses players.
             // Restore to ROUND_END instead so the host can cleanly start the next round.
@@ -237,6 +238,8 @@ class GameStateManager {
 const gameState = new GameStateManager();
 
 // ============ LOGGER ============
+const LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MB cap per log file
+
 class Logger {
     constructor() {
         this.logFile = FILES.mainLog;
@@ -248,16 +251,30 @@ class Logger {
         if (!fs.existsSync(this.errorFile)) fs.writeFileSync(this.errorFile, '');
     }
 
+    rotateIfNeeded(filePath) {
+        try {
+            const stat = fs.statSync(filePath);
+            if (stat.size > LOG_MAX_BYTES) {
+                const rotated = filePath.replace(/\.log$/, `.${Date.now()}.log`);
+                fs.renameSync(filePath, rotated);
+                fs.writeFileSync(filePath, '');
+                console.log(`📦 Log rotated: ${path.basename(filePath)} → ${path.basename(rotated)}`);
+            }
+        } catch (e) { /* ignore */ }
+    }
+
     log(msg, level = 'INFO') {
         const timestamp = new Date().toISOString();
         const logMessage = `[${timestamp}] [${level}] ${msg}`;
         console.log(logMessage);
         
+        this.rotateIfNeeded(this.logFile);
         fs.appendFile(this.logFile, logMessage + '\n', (err) => {
             if (err) console.error('Log write error:', err);
         });
 
         if (level === 'ERROR') {
+            this.rotateIfNeeded(this.errorFile);
             fs.appendFile(this.errorFile, logMessage + '\n', () => {});
         }
     }
@@ -572,6 +589,13 @@ wss.on('connection', (ws, req) => {
 
     ws.on('message', async (message) => {
         ws.messageCount++;
+
+        // Reject oversized messages before parsing to prevent memory exhaustion
+        if (message.length > 64 * 1024) {
+            logger.warn(`⚠️ Oversized message (${message.length} bytes) from ${ws.clientIp} — dropped`);
+            ws.send(JSON.stringify({ type: 'ERROR', message: 'Message too large' }));
+            return;
+        }
         
         try {
             const data = JSON.parse(message);
@@ -819,9 +843,12 @@ async function handleMessage(ws, data) {
                 break;
 
             case 'JOIN_SPELL': {
-                const spellUserId = data.userId || 'spell_' + Date.now();
-                const spellUsername = (data.username || "Guest").substring(0, 15);
-                const spellGrade = data.grade || null;
+                const rawSpellId = typeof data.userId === 'string' ? data.userId : '';
+                const spellUserId = rawSpellId.replace(/[^a-zA-Z0-9_\-]/g, '').substring(0, 64) || ('sp_' + Date.now());
+                const spellUsername = ((typeof data.username === 'string' ? data.username : 'Guest')
+                    .replace(/[<>]/g, '').substring(0, 15).trim()) || 'Guest';
+                const SPELL_VALID_GRADES = ['1-4', '5-9', '10-12'];
+                const spellGrade = SPELL_VALID_GRADES.includes(data.grade) ? data.grade : '1-4';
                 
                 debugLog(`Speller join: ${spellUsername} (${spellGrade})`);
                 
@@ -886,6 +913,17 @@ async function handleMessage(ws, data) {
                 if (durAdmin?.role === 'admin' && typeof data.duration === 'number') {
                     GAME_DURATION = Math.max(10, Math.min(600, data.duration));
                     sysLog(`⏱️ Game duration set to ${GAME_DURATION}s by host`);
+                }
+                break;
+            }
+
+            case 'SET_ROUNDS': {
+                const roundsAdmin = gameState.state.players.get(ws);
+                if (roundsAdmin?.role === 'admin' && typeof data.rounds === 'number') {
+                    const newMax = Math.max(1, Math.min(10, Math.floor(data.rounds)));
+                    gameState.state.maxRounds = newMax;
+                    sysLog(`🔢 Max rounds set to ${newMax} by host`);
+                    ws.send(JSON.stringify({ type: 'ROUNDS_UPDATED', maxRounds: newMax }));
                 }
                 break;
             }
@@ -960,7 +998,7 @@ async function handleMessage(ws, data) {
                     return;
                 }
                 
-                if (player?.role === 'player' && gameState.state.phase === 'RACING') {
+                if (player?.role === 'player' && gameState.state.phase === 'RACING' && !player.finished) {
                     player.wpm = data.wpm || 0;
                     player.acc = data.acc || 0;
                     player.progress = data.progress || 0;
@@ -979,6 +1017,17 @@ async function handleMessage(ws, data) {
             case 'SPELL_SUBMIT_FULL':
                 player = gameState.state.players.get(ws);
                 debugLog(`Spell submission from: ${player?.username}`);
+
+                // Guard: round must be active, and player must not have already submitted
+                if (!gameState.state.spellRoundActive) {
+                    logger.warn(`SPELL_SUBMIT ignored — no active round (${player?.username || ws.clientIp})`);
+                    ws.send(JSON.stringify({ type: 'ERROR', message: 'No active spelling round.' }));
+                    break;
+                }
+                if (player?.finished) {
+                    logger.warn(`Duplicate SPELL_SUBMIT from ${player.username} — ignored`);
+                    break;
+                }
                 
                 if (player && gameState.state.spellText) {
                     const targetText = gameState.state.spellText.trim();
@@ -1106,27 +1155,37 @@ async function handleTimeSync(ws, data) {
 async function handleJoin(ws, data) {
     if (data.role === 'admin') return;
 
-    const userId = data.userId;
-    const username = (data.username || "Guest").substring(0, 15);
-    const grade = data.grade || "1-4";
+    // Input validation — sanitise before anything else
+    const rawUserId = typeof data.userId === 'string' ? data.userId : '';
+    const userId = rawUserId.replace(/[^a-zA-Z0-9_\-]/g, '').substring(0, 64) || ('u_' + Date.now());
+    const username = (typeof data.username === 'string' ? data.username : 'Guest')
+        .replace(/[<>]/g, '').substring(0, 15).trim() || 'Guest';
+    const VALID_GRADES = ['1-4', '5-9', '10-12'];
+    const grade = VALID_GRADES.includes(data.grade) ? data.grade : '1-4';
 
     debugLog(`Join request: ${username} (${grade}) - userId: ${userId}`);
 
-    for (let [socket, p] of gameState.state.players.entries()) {
-        if (p.userId === userId && socket !== ws) {
-            gameState.state.players.delete(socket);
-            try {
-                socket.close();
-            } catch (e) {}
+    // Check whether this is a reconnect (same userId already present)
+    const isReconnect = Array.from(gameState.state.players.values())
+        .some(p => p.userId === userId && p.role === 'player');
+
+    // Enforce player cap BEFORE removing the old slot — reconnects don't count against cap
+    if (!isReconnect) {
+        const currentPlayerCount = Array.from(gameState.state.players.values())
+            .filter(p => p.role === 'player').length;
+        if (currentPlayerCount >= MAX_PLAYERS) {
+            ws.send(JSON.stringify({ type: 'ERROR', message: 'Server is full. Please try again later.' }));
+            logger.warn(`Player cap reached (${MAX_PLAYERS}), rejected: ${username}`);
+            return;
         }
     }
 
-    // Issue #20: Enforce max player cap
-    const currentPlayerCount = Array.from(gameState.state.players.values()).filter(p => p.role === 'player').length;
-    if (currentPlayerCount >= MAX_PLAYERS) {
-        ws.send(JSON.stringify({ type: 'ERROR', message: 'Server is full. Please try again later.' }));
-        logger.warn(`Player cap reached (${MAX_PLAYERS}), rejected: ${username}`);
-        return;
+    // Remove stale connection for same userId
+    for (let [socket, p] of gameState.state.players.entries()) {
+        if (p.userId === userId && socket !== ws) {
+            gameState.state.players.delete(socket);
+            try { socket.close(); } catch (e) {}
+        }
     }
 
     try {
@@ -1193,6 +1252,8 @@ async function handleJoin(ws, data) {
 // ============ FINISH HANDLING ============
 async function handleFinish(ws, data) {
     const p = gameState.state.players.get(ws);
+    // Ignore FINISH packets that arrive after the race has ended (stale network delivery)
+    if (gameState.state.phase !== 'RACING' && gameState.state.phase !== 'ROUND_END') return;
     if (p?.role === 'player' && !p.finished) {
         p.finished = true;
         p.wpm = data.wpm || 0;
@@ -1364,9 +1425,16 @@ function saveResultsToFile() {
     });
     output += `\n`;
     
+    const sessionTag = (gameState.state.gameId || Date.now().toString()).substring(0, 13);
+    const sessionResultsFile = path.join(DIRS.data, `results_${sessionTag}.txt`);
+    // Also append to master results file for full history
     fs.appendFile(FILES.resultsFile, output, (err) => {
-        if (err) logger.error(`File write error: ${err.message}`);
-        else sysLog(`✅ Results saved to ${FILES.resultsFile}`);
+        if (err) logger.error(`Master results write error: ${err.message}`);
+        else sysLog(`✅ Results appended to ${FILES.resultsFile}`);
+    });
+    fs.appendFile(sessionResultsFile, output, (err) => {
+        if (err) logger.error(`Session results write error: ${err.message}`);
+        else sysLog(`✅ Session results saved to ${sessionResultsFile}`);
     });
 }
 
@@ -1509,6 +1577,28 @@ rl.on('line', async (input) => {
         }
     }
 });
+
+// ── Graceful shutdown on SIGTERM / SIGINT (PM2, systemd, Ctrl-C) ──────────────
+async function gracefulShutdown(signal) {
+    sysLog(`⚠️ ${signal} received — shutting down gracefully...`);
+    await gameState.saveSnapshot();
+    broadcast({
+        type: 'SERVER_SHUTDOWN',
+        message: 'Server is restarting. Please reconnect in a moment.'
+    });
+    clearInterval(heartbeatInterval);
+    clearInterval(cleanupInterval);
+    clearInterval(memoryInterval);
+    setTimeout(() => {
+        db.close(() => {
+            sysLog('👋 Server stopped cleanly');
+            process.exit(0);
+        });
+    }, 1000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
 // Handle uncaught errors
 process.on('uncaughtException', (err) => {

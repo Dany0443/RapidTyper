@@ -54,15 +54,7 @@
         }
         .animate-shake { animation: shake 0.6s; }
 
-        .debug-info {
-            position: fixed;
-            bottom: 4px;
-            left: 4px;
-            font-size: 11px;
-            color: #646669;
-            font-family: 'Roboto Mono', monospace;
-            opacity: 0.7;
-        }
+
         .status-indicator { width: 10px; height: 10px; border-radius: 50%; }
         .status-green { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
         .status-yellow { background: #eab308; box-shadow: 0 0 10px #eab308; }
@@ -153,7 +145,7 @@
         <div id="game-screen" class="screen w-full max-w-4xl">
             <div class="flex justify-between items-center mb-4 text-xl" style="color: var(--main)">
                 <div class="flex gap-8">
-                    <div><span class="text-sm text-gray-500">Timp</span> <span id="timer" class="font-bold">60</span></div>
+                    <div><span class="text-sm text-gray-500">Timp</span> <span id="timer" class="font-bold">—</span></div>
                     <div><span class="text-sm text-gray-500">CPM</span> <span id="live-wpm" class="font-bold">0</span></div>
                     <div><span class="text-sm text-gray-500">Acuratete</span> <span id="live-acc" class="font-bold">100%</span></div>
                 </div>
@@ -191,23 +183,22 @@
         </div>
 
 
-        <div class="debug-info z-50 hover:opacity-100 transition-opacity">
-        <div class="flex items-center gap-2 mb-1">
-        <i class="fa-solid fa-network-wired text-xs"></i>
-        <span id="sync-indicator"></span>
+    <!-- Footer badges -->
+    <div class="fixed bottom-4 left-4 z-50 flex items-center gap-2 opacity-70 hover:opacity-100 transition-opacity">
+        <i class="fa-solid fa-network-wired text-xs text-gray-500"></i>
+        <span id="sync-indicator" class="text-xs text-gray-500 font-mono"></span>
     </div>
-    <div id="grade-indicator">Grade: <span id="grade-display">-</span></div>
-</div>
-        <a href="https://github.com/Dany0443" target="_blank" rel="noopener noreferrer" class="fixed bottom-4 right-4 z-50 flex items-center gap-2 opacity-50 hover:opacity-100 transition-opacity cursor-pointer text-gray-500 hover:text-[#e2b714]"> 
-            <span class="text-xs font-mono hidden sm:inline">Created by Dany0443</span> 
-            <i class="fa-brands fa-github text-xl"></i> 
-        </a>
+    <a href="https://github.com/Dany0443" target="_blank" rel="noopener noreferrer"
+       class="fixed bottom-4 right-4 z-50 flex items-center gap-2 opacity-50 hover:opacity-100 transition-opacity cursor-pointer text-gray-500 hover:text-[#e2b714]">
+        <span class="text-xs font-mono hidden sm:inline">Created by Dany0443</span>
+        <i class="fa-brands fa-github text-xl"></i>
+    </a>
 
     </main>
     <div id="countdown-overlay" class="fixed inset-0 bg-gray-900 bg-opacity-95 hidden items-center justify-center z-50 flex"><div id="countdown-number" class="text-9xl font-bold text-yellow-500">3</div></div>
 
     <script>
-        const WS_URL = "ws://localhost:5889";
+        const WS_URL = `ws://${location.hostname || "localhost"}:5889`;
         const LS_SESSION = "mt_session"; // shared key with spell.html
         
         let ws;
@@ -254,7 +245,7 @@
             if (user && user.username) {
                 document.getElementById('username-input').value = user.username;
                 if (user.grade) selectGrade(user.grade, null);
-                document.getElementById('grade-display').textContent = user.grade;
+                // grade-display element removed (was in old debug-info div)
                 document.getElementById('display-name').textContent = user.username;
             }
             // Start connecting — login screen shown only after connection succeeds
@@ -283,7 +274,9 @@
                 btn.classList.add('selected');
             } else {
                 document.querySelectorAll('.grade-btn').forEach(b => { 
-                    if (b.textContent.trim() === grade) b.classList.add('selected'); 
+                    // Button text is "1 - 4" but grade values are "1-4" — normalise both before comparing
+                    const btnGrade = b.textContent.trim().replace(/\s*-\s*/g, '-');
+                    if (btnGrade === grade) b.classList.add('selected'); 
                 });
             }
         }
@@ -460,7 +453,8 @@
                     break;
 
                 case 'SYNC_STATE':
-                    if (data.mode === 'spell') { window.location.href = 'spell.html'; return; }
+                    // Don't redirect mid-game — only when not actively typing
+                    if (data.mode === 'spell' && !gameState.active) { window.location.href = 'spell.html'; return; }
                     if (data.currentRound) currentRound = data.currentRound;
                     if (data.maxRounds)   maxRounds   = data.maxRounds;
                     break;
@@ -483,16 +477,29 @@
                     break;
                     
                 case 'KICKED':
-                    // Host kicked this player — clear session and go to login
+                    // Host kicked this player — clear session and show inline message
                     localStorage.removeItem(LS_SESSION);
-                    alert('You have been removed by the host.');
-                    location.reload();
+                    {
+                        // Show a visible message without blocking alert()
+                        const kickMsg = document.createElement('div');
+                        kickMsg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:1rem;font-family:Roboto Mono,monospace;color:#d1d0c5';
+                        kickMsg.innerHTML = '<i class="fa-solid fa-ban" style="font-size:3rem;color:#ca4754"></i><p style="font-size:1.25rem;font-weight:700">Removed by host</p><p style="color:#646669;font-size:0.875rem">Reloading...</p>';
+                        document.body.appendChild(kickMsg);
+                        setTimeout(() => location.reload(), 2000);
+                    }
                     break;
 
                 case 'SERVER_SHUTDOWN':
-                    alert(data.message);
-                    document.getElementById('status-dot').className = 'status-indicator status-yellow';
-                    document.getElementById('status-text').textContent = 'Server restarting...';
+                    {
+                        document.getElementById('status-dot').className = 'status-indicator status-yellow';
+                        document.getElementById('status-text').textContent = 'Server restarting...';
+                        // Non-blocking shutdown notice
+                        const shutMsg = document.createElement('div');
+                        shutMsg.style.cssText = 'position:fixed;bottom:5rem;left:50%;transform:translateX(-50%);background:#2c2e31;border:1px solid var(--main);color:var(--text);padding:0.75rem 1.5rem;border-radius:8px;z-index:9999;font-family:Roboto Mono,monospace;font-size:0.875rem;text-align:center;';
+                        shutMsg.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-2" style="color:var(--main)"></i>' + (data.message || 'Server restarting…');
+                        document.body.appendChild(shutMsg);
+                        setTimeout(() => shutMsg.remove(), 8000);
+                    }
                     break;
                     
                 case 'ERROR':
@@ -533,7 +540,7 @@
 
     const userData = { userId, username: name, grade: selectedGrade };
     localStorage.setItem(LS_SESSION, JSON.stringify(userData));
-    document.getElementById('grade-display').textContent = selectedGrade;
+    // grade-display element removed (was in old debug-info div)
     document.getElementById('display-name').textContent = name;
     
     hasJoined = true;
@@ -586,15 +593,10 @@
             };
 
             els.wordsContainer.innerHTML = '';
-            gameState.words.forEach(word => {
-                const wDiv = document.createElement('div'); 
-                wDiv.className = 'word';
-                word.split('').forEach(char => {
-                    const lSpan = document.createElement('span'); 
-                    lSpan.className = 'letter'; 
-                    lSpan.textContent = char;
-                    wDiv.appendChild(lSpan);
-                });
+            // Pre-render all word divs with default state (no input yet)
+            gameState.words.forEach((word, i) => {
+                const wDiv = document.createElement('div');
+                renderWordDiv(wDiv, word, null, false);
                 els.wordsContainer.appendChild(wDiv);
             });
 
@@ -658,64 +660,59 @@
             }
         });
 
+        // Render a single word div given typed string vs target string
+        function renderWordDiv(div, wStr, comp, isActive) {
+            div.innerHTML = '';
+            div.className = 'word';
+            if (isActive) div.classList.add('active');
+
+            if (comp !== null) {
+                const maxLen = Math.max(comp.length, wStr.length);
+                for (let j = 0; j < maxLen; j++) {
+                    const span = document.createElement('span');
+                    span.className = 'letter';
+                    if (j < wStr.length) {
+                        span.textContent = wStr[j];
+                        if (j < comp.length) {
+                            span.classList.add(comp[j] === wStr[j] ? 'correct' : 'incorrect');
+                        }
+                    } else {
+                        span.textContent = comp[j];
+                        span.classList.add('extra');
+                    }
+                    div.appendChild(span);
+                }
+                if (comp.length > wStr.length) div.classList.add('error-underline');
+            } else {
+                for (let j = 0; j < wStr.length; j++) {
+                    const span = document.createElement('span');
+                    span.className = 'letter';
+                    span.textContent = wStr[j];
+                    div.appendChild(span);
+                }
+            }
+        }
+
         function updateUI() {
             const divs = els.wordsContainer.children;
             const idx = gameState.wordIndex;
             const input = gameState.inputVal;
 
-            for (let i = 0; i < divs.length; i++) {
+            // Only re-render the active word and the word just completed (previous).
+            // All other words are already rendered correctly from the last update.
+            // On first render (idx===0, no history) we need to render everything once —
+            // that is handled by buildWordDivs which pre-populates all divs.
+            const toUpdate = new Set([idx]);
+            if (idx > 0) toUpdate.add(idx - 1);
+
+            for (const i of toUpdate) {
                 const div = divs[i];
+                if (!div) continue;
                 const wStr = gameState.words[i];
-                
-                div.innerHTML = '';
-                div.className = 'word';
-
                 let comp = null;
-                if (i < idx) { 
-                    comp = gameState.history[i]; 
-                } else if (i === idx) { 
-                    comp = input; 
-                    div.classList.add('active'); 
-                } else {
-                    comp = null;
-                }
-
-                if (comp !== null) {
-                    const maxLen = Math.max(comp.length, wStr.length);
-                    
-                    for (let j = 0; j < maxLen; j++) {
-                        const span = document.createElement('span');
-                        span.className = 'letter';
-                        
-                        if (j < wStr.length) {
-                            span.textContent = wStr[j];
-                            
-                            if (j < comp.length) {
-                                if (comp[j] === wStr[j]) {
-                                    span.classList.add('correct');
-                                } else {
-                                    span.classList.add('incorrect');
-                                }
-                            }
-                        } else {
-                            span.textContent = comp[j];
-                            span.classList.add('extra');
-                        }
-                        
-                        div.appendChild(span);
-                    }
-                    
-                    if (comp.length > wStr.length) {
-                        div.classList.add('error-underline');
-                    }
-                } else {
-                    for (let j = 0; j < wStr.length; j++) {
-                        const span = document.createElement('span');
-                        span.className = 'letter';
-                        span.textContent = wStr[j];
-                        div.appendChild(span);
-                    }
-                }
+                if (i < idx) { comp = gameState.history[i]; }
+                else if (i === idx) { comp = input; }
+                renderWordDiv(div, wStr, comp, i === idx);
             }
 
             updateCaretPosition();
@@ -787,30 +784,25 @@
                 const progress = Math.round((gameState.wordIndex / gameState.words.length) * 100);
 
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    // --- NEW: Calculate Consistency LIVE ---
-                let liveCons = 0;
-                const snaps = gameState.stats.wpmSnapshots;
-                if (snaps.length >= 2) {
-                    const mean = snaps.reduce((a, b) => a + b, 0) / snaps.length;
-                    const squaredDiffs = snaps.map(val => Math.pow(val - mean, 2));
-                    const variance = squaredDiffs.reduce((a, b) => a + b, 0) / snaps.length;
-                    const stdDev = Math.sqrt(variance);
-                    const cv = mean > 0 ? (stdDev / mean) : 0;
-                    liveCons = Math.max(0, Math.min(100, Math.round((1 - cv) * 100)));
-                }
-                // ---------------------------------------
-
-                if (ws && ws.readyState === WebSocket.OPEN) {
+                    // Calculate Consistency LIVE
+                    let liveCons = 0;
+                    const snaps = gameState.stats.wpmSnapshots;
+                    if (snaps.length >= 2) {
+                        const mean = snaps.reduce((a, b) => a + b, 0) / snaps.length;
+                        const squaredDiffs = snaps.map(val => Math.pow(val - mean, 2));
+                        const variance = squaredDiffs.reduce((a, b) => a + b, 0) / snaps.length;
+                        const stdDev = Math.sqrt(variance);
+                        const cv = mean > 0 ? (stdDev / mean) : 0;
+                        liveCons = Math.max(0, Math.min(100, Math.round((1 - cv) * 100)));
+                    }
                     ws.send(JSON.stringify({ 
                         type: 'PROGRESS_UPDATE', 
                         wpm: wpm, 
                         acc: Math.max(0, acc), 
                         progress: progress,
-                        // NEW: Send errors and consistency live
                         errors: gameState.stats.errors,
                         consistency: liveCons
                     }));
-                }
                 }
             }
             

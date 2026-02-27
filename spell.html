@@ -48,16 +48,6 @@
             resize: none;
         }
 
-        .debug-info {
-            position: fixed;
-            bottom: 4px;
-            left: 4px;
-            font-size: 11px;
-            color: #646669;
-            font-family: 'Roboto Mono', monospace;
-            opacity: 0.7;
-        }
-        
         .status-indicator { width: 10px; height: 10px; border-radius: 50%; }
         .status-green { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
         .status-red { background: #ef4444; box-shadow: 0 0 10px #ef4444; }
@@ -98,14 +88,6 @@
     </header>
 
     <main class="flex-1 flex items-center justify-center p-8">
-
-        <div class="debug-info z-50 hover:opacity-100 transition-opacity">
-        <div class="flex items-center gap-2 mb-1">
-        <i class="fa-solid fa-network-wired text-xs"></i>
-        <span id="sync-indicator"></span>
-        </div>
-        <div id="grade-indicator">Grade: <span id="grade-display">-</span></div>
-        </div>
 
         <!-- CONNECTING SCREEN -->
         <div id="connecting-screen" class="screen active text-center max-w-md w-full p-6">
@@ -219,15 +201,21 @@
                 <button onclick="switchScreen('waiting-screen')" class="btn px-8">Back to Waiting Room</button>
             </div>
         </div>
-            <a href="https://github.com/Dany0443" target="_blank" rel="noopener noreferrer" class="fixed bottom-4 right-4 z-50 flex items-center gap-2 opacity-50 hover:opacity-100 transition-opacity cursor-pointer text-gray-500 hover:text-[#e2b714]"> 
-            <span class="text-xs font-mono hidden sm:inline">Created by Dany0443</span> 
-            <i class="fa-brands fa-github text-xl"></i> 
-            </a>
+    <!-- Footer badges -->
+    <div class="fixed bottom-4 left-4 z-50 flex items-center gap-2 opacity-70 hover:opacity-100 transition-opacity">
+        <i class="fa-solid fa-network-wired text-xs text-gray-500"></i>
+        <span id="sync-indicator" class="text-xs text-gray-500 font-mono"></span>
+    </div>
+    <a href="https://github.com/Dany0443" target="_blank" rel="noopener noreferrer"
+       class="fixed bottom-4 right-4 z-50 flex items-center gap-2 opacity-50 hover:opacity-100 transition-opacity cursor-pointer text-gray-500 hover:text-[#e2b714]">
+        <span class="text-xs font-mono hidden sm:inline">Created by Dany0443</span>
+        <i class="fa-brands fa-github text-xl"></i>
+    </a>
 
     </main>
 
     <script>
-        const WS_URL = "ws://localhost:5889";
+        const WS_URL = `ws://${location.hostname || "localhost"}:5889`;
         const LS_SESSION = "mt_session"; // same key as index.html — shared session
         const LS_SPELL_DRAFT = "mt_spell_draft";
         
@@ -257,7 +245,7 @@
             if (user && user.username && user.grade) {
                 document.getElementById('username-input').value = user.username;
                 document.getElementById('display-name').textContent = user.username;
-                document.getElementById('grade-display').textContent = user.grade;
+                // grade-display removed
                 selectedGrade = user.grade;  
                 selectGrade(user.grade, null);
                 myData = user;
@@ -279,7 +267,8 @@
                 btn.classList.add('selected');
             } else {
                 document.querySelectorAll('.grade-btn').forEach(b => { 
-                    if (b.textContent.trim() === grade) b.classList.add('selected'); 
+                    const btnGrade = b.textContent.trim().replace(/\s*-\s*/g, '-');
+                    if (btnGrade === grade) b.classList.add('selected'); 
                 });
             }
         }
@@ -300,7 +289,8 @@
             ws.onopen = () => {
             document.getElementById('status-dot').className = 'status-indicator status-green';
             document.getElementById('status-text').textContent = 'Conectat';
-            document.getElementById('sync-indicator').textContent = 'Connected';
+            const si = document.getElementById('sync-indicator');
+            if (si) si.textContent = 'Connected';
             reconnectAttempts = 0;
 
                 const user = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
@@ -417,8 +407,13 @@
                 case 'KICKED':
                     localStorage.removeItem(LS_SESSION);
                     localStorage.removeItem(LS_SPELL_DRAFT);
-                    alert('You have been removed by the host.');
-                    location.reload();
+                    {
+                        const kickMsg = document.createElement('div');
+                        kickMsg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:1rem;font-family:Roboto Mono,monospace;color:#d1d0c5';
+                        kickMsg.innerHTML = '<i class="fa-solid fa-ban" style="font-size:3rem;color:#ca4754"></i><p style="font-size:1.25rem;font-weight:700">Removed by host</p><p style="color:#646669;font-size:0.875rem">Reloading...</p>';
+                        document.body.appendChild(kickMsg);
+                        setTimeout(() => location.reload(), 2000);
+                    }
                     break;
 
                 case 'JOIN_SUCCESS':
@@ -459,7 +454,6 @@
             const userData = { userId, username: name, grade: selectedGrade };
             localStorage.setItem(LS_SESSION, JSON.stringify(userData));
             localStorage.setItem('sb_grade', selectedGrade);
-            document.getElementById('grade-display').textContent = selectedGrade;
             myData = userData;
             document.getElementById('display-name').textContent = name;
             
@@ -497,22 +491,37 @@
 
         function submitDictation() {
             const text = els.input.value.trim();
-            if(!text) {
-                alert("Please type something before submitting.");
+            if (!text) {
+                els.input.style.borderColor = 'var(--wrong)';
+                setTimeout(() => els.input.style.borderColor = '', 1500);
                 return;
             }
-            if(confirm("Are you sure you want to submit?")) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                document.getElementById('status-text').textContent = 'Nu ești conectat...';
+                return;
+            }
+            // Replace confirm() with a two-click submit: first press arms it, second sends
+            const btn = document.querySelector('button[onclick="submitDictation()"]');
+            if (btn && !btn.dataset.armed) {
+                btn.dataset.armed = '1';
+                const orig = btn.innerHTML;
+                btn.innerHTML = '<i class="fa-solid fa-check mr-2"></i> CONFIRM SUBMIT';
+                btn.style.background = 'var(--main)';
+                btn.style.color = '#323437';
+                setTimeout(() => {
+                    btn.dataset.armed = '';
+                    btn.innerHTML = orig;
+                    btn.style.background = '';
+                    btn.style.color = '';
+                }, 3000);
+                return;
+            }
+            // Second press — actually submit
+            if (btn) { btn.dataset.armed = ''; btn.innerHTML = '<i class="fa-solid fa-check mr-2"></i> Submitted!'; btn.disabled = true; }
             ws.send(JSON.stringify({ type: 'SPELL_SUBMIT_FULL', text: text }));
-            
-            // Mark game as finished
             spellGameState.active = false;
             localStorage.removeItem(LS_SPELL_DRAFT);
-        } else {
-            alert("Not connected to server!");
-            }
         }
-    }
 
         function showFullResult(data) {
             switchScreen('result-screen');
