@@ -271,7 +271,8 @@
                             <div class="text-xs font-bold uppercase" style="color:var(--sub)">Competition Text</div>
                             <button onclick="updateText()" class="btn text-xs py-1 px-3"><i class="fa-solid fa-save mr-1"></i>Save</button>
                         </div>
-                        <textarea id="game-text" class="host-textarea" rows="5" placeholder="Enter the text players will type..."></textarea>
+                        <textarea id="game-text" class="host-textarea" rows="5" placeholder="Enter the text players will type..." oninput="_updateCount('game-text','game-text-count')"></textarea>
+                        <div id="game-text-count" class="text-xs mt-1 text-right" style="color:var(--sub)">0 cuvinte · 0 caractere</div>
                     </div>
                 </div>
 
@@ -316,7 +317,13 @@
                         </div>
                         <div>
                             <div class="text-xs font-bold uppercase mb-1" style="color:var(--sub)">Spellers</div>
-                            <div class="text-4xl font-bold" style="color:var(--main)"><span id="speller-count">0</span></div>
+                            <div class="text-4xl font-bold mb-2" style="color:var(--main)"><span id="speller-count">0</span></div>
+                            <div class="flex flex-col gap-1" style="font-size:0.72rem;color:var(--sub)">
+                                <div class="flex justify-between gap-3"><span>Cl. 1–4</span><span id="sg-14" class="font-bold" style="color:var(--text)">0</span></div>
+                                <div class="flex justify-between gap-3"><span>Cl. 5–9</span><span id="sg-59" class="font-bold" style="color:var(--text)">0</span></div>
+                                <div class="flex justify-between gap-3"><span>Cl. 10–12</span><span id="sg-1012" class="font-bold" style="color:var(--text)">0</span></div>
+                                <div class="flex justify-between gap-3 pt-1" style="border-top:1px solid rgba(255,255,255,0.07)"><span>Trimis</span><span id="sg-sub" class="font-bold" style="color:var(--main)">0</span></div>
+                            </div>
                         </div>
                         <div class="flex flex-col gap-2 mt-auto pt-2">
                             <button onclick="startSpellGame()" id="start-spell-btn" class="btn btn-primary text-sm w-full">
@@ -333,7 +340,8 @@
                             <div class="text-xs font-bold uppercase" style="color:var(--sub)">Dictation Text</div>
                             <button onclick="updateSpellText()" class="btn text-xs py-1 px-3"><i class="fa-solid fa-save mr-1"></i>Save</button>
                         </div>
-                        <textarea id="spell-text" class="host-textarea" rows="5" placeholder="Enter the dictation text..."></textarea>
+                        <textarea id="spell-text" class="host-textarea" rows="5" placeholder="Enter the dictation text..." oninput="_updateCount('spell-text','spell-text-count')"></textarea>
+                        <div id="spell-text-count" class="text-xs mt-1 text-right" style="color:var(--sub)">0 cuvinte · 0 caractere</div>
                     </div>
                 </div>
 
@@ -443,6 +451,16 @@
         let maxRounds    = 3;
         let phase = 'LOBBY';
         let spellRoundActive = false;
+
+        // ── Word/char counter for text areas ──────────────────────────
+        function _updateCount(taId, countId) {
+            const ta = document.getElementById(taId);
+            const el = document.getElementById(countId);
+            if (!ta || !el) return;
+            const txt = ta.value.trim();
+            const words = txt ? txt.split(/\s+/).length : 0;
+            el.textContent = words + ' cuvinte · ' + ta.value.length + ' caractere';
+        }
 
         // ── Duration ─────────────────────────────────────────────────
         function setDuration(sec, btn) {
@@ -580,13 +598,34 @@
                 case 'AUTH_SUCCESS':
                     isAuthenticated = true;
                     document.getElementById('logout-btn').style.display = 'block';
-                    if (data.currentText)      document.getElementById('game-text').value  = data.currentText;
-                    if (data.currentSpellText) document.getElementById('spell-text').value = data.currentSpellText;
+                    if (data.currentText) {
+                        document.getElementById('game-text').value = data.currentText;
+                        _updateCount('game-text', 'game-text-count');
+                    }
+                    if (data.currentSpellText) {
+                        document.getElementById('spell-text').value = data.currentSpellText;
+                        _updateCount('spell-text', 'spell-text-count');
+                    }
                     if (data.gameState?.currentRound) {
                         currentRound = data.gameState.currentRound;
                         maxRounds    = data.gameState.maxRounds || 3;
                     }
                     phase = data.gameState?.phase || 'LOBBY';
+                    // Restore duration button
+                    if (data.gameDuration) {
+                        raceDuration = data.gameDuration;
+                        document.querySelectorAll('#dur-btns .dur-btn').forEach(b => {
+                            const sec = parseInt(b.textContent) || (b.textContent.includes('2m') ? 120 : 0);
+                            b.classList.toggle('active', sec === data.gameDuration);
+                        });
+                    }
+                    // Restore rounds button
+                    if (data.maxRounds) {
+                        maxRounds = data.maxRounds;
+                        document.querySelectorAll('#round-btns .dur-btn').forEach(b => {
+                            b.classList.toggle('active', parseInt(b.textContent) === data.maxRounds);
+                        });
+                    }
                     updateRoundUI();
                     showScreen('lobby-screen');
                     break;
@@ -776,6 +815,14 @@
         // ── Speller render ────────────────────────────────────────────
         function renderSpellerGrid() {
             const grid = document.getElementById('speller-grid');
+            // Grade breakdown (always from full list)
+            const _g = (grade) => allSpellers.filter(p => p.grade === grade).length;
+            const _set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+            _set('sg-14',   _g('1-4'));
+            _set('sg-59',   _g('5-9'));
+            _set('sg-1012', _g('10-12'));
+            _set('sg-sub',  allSpellers.filter(p => p.submitted).length);
+
             let list = [...allSpellers];
             if (currentSpellFilter !== 'all') list = list.filter(p => p.grade === currentSpellFilter);
 

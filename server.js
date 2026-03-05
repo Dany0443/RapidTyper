@@ -308,9 +308,9 @@ function loadText() {
     }
 }
 
-function saveText(text) {
+async function saveText(text) {
     try {
-        fs.writeFileSync(FILES.textFile, text, 'utf8');
+        await fs.promises.writeFile(FILES.textFile, text, 'utf8');
         sysLog(`💾 Text saved (${text.length} chars)`);
         return true;
     } catch (err) {
@@ -339,9 +339,9 @@ function loadSpellText() {
     }
 }
 
-function saveSpellText(text) {
+async function saveSpellText(text) {
     try {
-        fs.writeFileSync(FILES.spellFile, text, 'utf8');
+        await fs.promises.writeFile(FILES.spellFile, text, 'utf8');
         sysLog(`💾 Spell text saved (${text.length} chars)`);
         return true;
     } catch (err) {
@@ -394,7 +394,15 @@ db.serialize(() => {
 
     db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`, err => { if (err) logger.error('CREATE INDEX sessions: ' + err.message); });
     db.run(`CREATE INDEX IF NOT EXISTS idx_sync_user ON sync_events(user_id)`, err => { if (err) logger.error('CREATE INDEX sync: ' + err.message); });
+    // Purge old sync events on startup (keep 7 days)
+    db.run(`DELETE FROM sync_events WHERE created_at < datetime('now', '-7 days')`, err => {
+        if (!err) sysLog('🗑️ sync_events: purged records older than 7 days');
+    });
 });
+// Daily cleanup
+setInterval(() => {
+    db.run(`DELETE FROM sync_events WHERE created_at < datetime('now', '-7 days')`);
+}, 24 * 60 * 60 * 1000);
 
 function dbRunAsync(query, params = []) {
     return new Promise((resolve, reject) => {
@@ -739,7 +747,9 @@ async function handleMessage(ws, data) {
                         type: 'AUTH_SUCCESS',
                         currentText: gameState.state.text,
                         currentSpellText: gameState.state.spellText,
-                        gameState: gameState.getState()
+                        gameState: gameState.getState(),
+                        gameDuration: GAME_DURATION,
+                        maxRounds: gameState.state.maxRounds
                     }));
                     sysLog("👑 Host connected");
                     broadcastLobbyState();
@@ -772,10 +782,12 @@ async function handleMessage(ws, data) {
                     gameState.state.spellStartTime = timeSync.getServerTime();
                     sysLog("📖 Spelling round started");
                     
+                    const _spellWc = gameState.state.spellText.trim().split(/\s+/).length;
                     broadcast({ 
                         type: 'SPELL_START',
                         startTime: gameState.state.spellStartTime,
-                        serverTime: timeSync.getServerTime()
+                        serverTime: timeSync.getServerTime(),
+                        wordCount: _spellWc
                     }, client => 
                         gameState.state.players.get(client)?.role === 'speller'
                     );
@@ -812,18 +824,10 @@ async function handleMessage(ws, data) {
                     debugLog(`Text update request, mode: ${data.mode}`);
                     if (data.mode === 'spell') {
                         gameState.state.spellText = data.text;
-                        if (saveSpellText(data.text)) {
-                            ws.send(JSON.stringify({ type: 'TEXT_UPDATE_SUCCESS' }));
-                        } else {
-                            ws.send(JSON.stringify({ type: 'TEXT_UPDATE_PARTIAL' }));
-                        }
+                        ws.send(JSON.stringify({ type: (await saveSpellText(data.text)) ? 'TEXT_UPDATE_SUCCESS' : 'TEXT_UPDATE_PARTIAL' }));
                     } else {
                         gameState.state.text = data.text;
-                        if (saveText(data.text)) {
-                            ws.send(JSON.stringify({ type: 'TEXT_UPDATE_SUCCESS' }));
-                        } else {
-                            ws.send(JSON.stringify({ type: 'TEXT_UPDATE_PARTIAL' }));
-                        }
+                        ws.send(JSON.stringify({ type: (await saveText(data.text)) ? 'TEXT_UPDATE_SUCCESS' : 'TEXT_UPDATE_PARTIAL' }));
                     }
                 }
                 break;
@@ -878,9 +882,11 @@ async function handleMessage(ws, data) {
                 
                 // If round already active, pull them in
                 if (gameState.state.spellRoundActive) {
+                    const _wc = gameState.state.spellText.trim().split(/\s+/).length;
                     ws.send(JSON.stringify({ 
                         type: 'SPELL_START',
-                        serverTime: timeSync.getServerTime()
+                        serverTime: timeSync.getServerTime(),
+                        wordCount: _wc
                     }));
                 }
                 
@@ -1035,21 +1041,24 @@ async function handleMessage(ws, data) {
                     
                     const targetWords = targetText.split(/\s+/);
                     const submittedWords = submittedText.split(/\s+/);
-                    
+
+                    // Normalise for comparison: lowercase + strip leading/trailing punctuation
+                    const norm = w => w.toLowerCase().replace(/^[\W]+|[\W]+$/g, '');
+
                     let correctCount = 0;
                     let diff = [];
                     
                     const maxLen = Math.max(targetWords.length, submittedWords.length);
                     
-                    for(let i = 0; i < maxLen; i++) {
-                        const t = targetWords[i] || "";
-                        const s = submittedWords[i] || "";
-                        
-                        if(t === s) {
+                    for (let i = 0; i < maxLen; i++) {
+                        const t = targetWords[i] || '';
+                        const sub = submittedWords[i] || '';
+                        const isCorrect = t && sub && norm(t) === norm(sub);
+                        if (isCorrect) {
                             correctCount++;
-                            diff.push({ word: s, status: 'correct' });
+                            diff.push({ word: sub, status: 'correct' });
                         } else {
-                            diff.push({ word: s, status: 'wrong', expected: t });
+                            diff.push({ word: sub || '—', status: 'wrong', expected: t });
                         }
                     }
                     
@@ -1074,6 +1083,9 @@ async function handleMessage(ws, data) {
                     
                     debugLog(`Spell result: ${player.username} - ${accuracy}% accuracy, ${percentile}% percentile`);
                     
+                    // Rank = number of spellers who have scored HIGHER so far + 1
+                    const finishedSpellers = allSpellers.filter(p => p.finished && p !== player);
+                    const rank = finishedSpellers.filter(p => (p.score || 0) > accuracy).length + 1;
                     ws.send(JSON.stringify({
                         type: 'SPELL_RESULT_FULL',
                         accuracy: accuracy,
@@ -1083,7 +1095,9 @@ async function handleMessage(ws, data) {
                         stats: {
                             correct: correctCount,
                             incorrect: targetWords.length - correctCount,
-                            percentile: percentile
+                            percentile: percentile,
+                            rank: rank,
+                            totalSpellers: totalSpellers
                         }
                     }));
                     
@@ -1368,11 +1382,19 @@ async function endGame() {
     sysLog(`🛑 Round ${round}/${maxRounds} finished`);
     saveResultsToFile();
 
+    // Build rank map; clients match on their own userId
+    const _rankings = Array.from(gameState.state.players.values())
+        .filter(p => p.role === 'player')
+        .sort((a, b) => (b.wpm || 0) - (a.wpm || 0))
+        .map((p, i) => ({ userId: p.userId, rank: i + 1 }));
+
     broadcast({ 
         type: 'GAME_OVER',
         round,
         maxRounds,
         isLastRound,
+        rankings: _rankings,
+        totalPlayers: _rankings.length,
         serverTime: timeSync.getServerTime()
     });
 

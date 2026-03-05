@@ -83,6 +83,13 @@
         @keyframes livePulse { 0%,100% { box-shadow: none; } 50% { box-shadow: 0 0 0 4px rgba(34,197,94,0.15); } }
         .header-right { display: flex; align-items: center; gap: 1rem; }
         .conn-status { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+        .round-badge { background: rgba(226,183,20,0.12); border: 1px solid rgba(226,183,20,0.35); color: var(--gold); border-radius: 6px; padding: 3px 12px; font-size: 0.72rem; letter-spacing: 2px; font-weight: 700; }
+
+        /* ── Countdown screen ── */
+        #countdown-screen { justify-content: center; align-items: center; background: var(--bg); z-index: 1500; gap: 1rem; }
+        .cd-num { font-family: 'Bebas Neue', sans-serif; font-size: 22vw; line-height: 1; color: var(--gold); animation: cdPop 1s ease-in-out; }
+        .cd-label { font-size: 0.9rem; letter-spacing: 6px; color: var(--sub); text-transform: uppercase; }
+        @keyframes cdPop { 0% { transform: scale(1.4); opacity: 0; } 60% { transform: scale(0.95); opacity: 1; } 100% { transform: scale(1); } }
 
         /* ══════════════════════════════════
            LOBBY
@@ -234,11 +241,18 @@
         </div>
     </div>
 
+    <!-- COUNTDOWN -->
+    <div id="countdown-screen" class="screen">
+        <div class="cd-num" id="cd-number">3</div>
+        <div class="cd-label" id="cd-label">Pregătește-te!</div>
+    </div>
+
     <!-- LOBBY -->
     <div id="lobby-screen" class="screen">
         <div class="board-header">
             <div class="header-logo">Fast<span>Typer</span></div>
             <div class="header-badge">Sala de Așteptare</div>
+            <div id="lobby-round-badge" class="round-badge" style="display:none"></div>
             <div class="header-right">
                 <div class="conn-status"></div>
                 <span style="font-size:0.72rem;color:var(--sub);letter-spacing:1px;">LIVE</span>
@@ -287,6 +301,7 @@
         <div class="board-header">
             <div class="header-logo">Fast<span>Typer</span></div>
             <div class="header-badge live">● LIVE RACE</div>
+            <div id="racing-round-badge" class="round-badge" style="display:none"></div>
             <div class="header-right"><div class="conn-status"></div></div>
         </div>
         <div class="race-body">
@@ -322,6 +337,7 @@
         <div class="board-header">
             <div class="header-logo">Fast<span>Typer</span></div>
             <div class="header-badge">Rezultate Finale</div>
+            <div id="results-round-badge" class="round-badge" style="display:none"></div>
             <div class="header-right"><div class="conn-status"></div></div>
         </div>
         <div class="results-body">
@@ -359,12 +375,14 @@
     </div>
 
     <script>
-        const WS_URL = "ws://localhost:5889";
+        const WS_URL = `ws://${location.hostname || 'localhost'}:5889`;
 
         let ws, gamePhase = 'LOBBY', players = [];
         let raceStartTime = null, raceDuration = 20;
         let timerInterval = null, confettiTriggered = false;
         let reconnectAttempts = 0;
+        let currentRound = 0, maxRounds = 0;
+        let cdInterval = null;
 
         function connect() {
             ws = new WebSocket(WS_URL);
@@ -398,38 +416,97 @@
                 case 'UPDATE_LOBBY':
                     if (data.players) players = data.players;
                     gamePhase = data.phase || gamePhase;
+                    updateRoundBadges();
                     if (gamePhase === 'LOBBY' || gamePhase === 'COUNTDOWN') renderLobby();
                     else if (gamePhase === 'RACING') renderRacing();
                     break;
                 case 'START_GAME':
                     gamePhase = 'RACING';
+                    if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
                     raceStartTime = data.startTime || Date.now();
                     raceDuration = data.duration || 20;
                     confettiTriggered = false;
+                    updateRoundBadges();
                     showScreen('racing-screen');
                     startRaceTimer();
                     break;
                 case 'GAME_OVER':
                     gamePhase = 'FINISHED';
+                    if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
                     stopRaceTimer();
+                    updateRoundBadges();
                     showScreen('results-screen');
                     renderResults();
                     break;
+                case 'SERIES_COMPLETE':
+                case 'SERIES_OVER':
+                    // Hold results screen for 15s then return to lobby
+                    setTimeout(() => {
+                        gamePhase = 'LOBBY';
+                        confettiTriggered = false;
+                        currentRound = 0; maxRounds = 0;
+                        updateRoundBadges();
+                        players = [];
+                        showScreen('lobby-screen');
+                        renderLobby();
+                    }, 15000);
+                    break;
+
                 case 'FORCE_RESET':
                     gamePhase = 'LOBBY';
                     confettiTriggered = false;
                     stopRaceTimer();
+                    currentRound = 0; maxRounds = 0;
+                    updateRoundBadges();
                     players = [];
                     showScreen('lobby-screen');
                     renderLobby();
                     break;
                 case 'COUNTDOWN':
+                    if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
                     if (gamePhase !== 'RACING') {
                         gamePhase = 'COUNTDOWN';
-                        showScreen('lobby-screen');
+                        runCountdown(data.count);
                     }
                     break;
             }
+        }
+
+        function updateRoundBadges() {
+            if (!currentRound || !maxRounds) {
+                ['lobby-round-badge','racing-round-badge','results-round-badge'].forEach(id => {
+                    const el = document.getElementById(id); if (el) el.style.display = 'none';
+                });
+                return;
+            }
+            const txt = 'RUNDA ' + currentRound + ' / ' + maxRounds;
+            ['lobby-round-badge','racing-round-badge','results-round-badge'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) { el.textContent = txt; el.style.display = 'inline-block'; }
+            });
+        }
+
+        function runCountdown(startNum) {
+            if (cdInterval) clearInterval(cdInterval);
+            showScreen('countdown-screen');
+            let n = startNum || 3;
+            document.getElementById('cd-number').textContent = n;
+            document.getElementById('cd-label').textContent = 'Pregătește-te!';
+            cdInterval = setInterval(() => {
+                n--;
+                if (n > 0) {
+                    document.getElementById('cd-number').textContent = n;
+                    // Trigger re-animation by cloning the element
+                    const el = document.getElementById('cd-number');
+                    const clone = el.cloneNode(true);
+                    el.parentNode.replaceChild(clone, el);
+                } else {
+                    clearInterval(cdInterval); cdInterval = null;
+                    // The START_GAME message will arrive shortly and switch screen
+                    document.getElementById('cd-number').textContent = '🏁';
+                    document.getElementById('cd-label').textContent = 'START!';
+                }
+            }, 1000);
         }
 
         function showScreen(id) {

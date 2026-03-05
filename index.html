@@ -170,15 +170,18 @@
                 <h2 class="text-4xl font-bold">Rezultate</h2>
                 <div id="res-round-info" class="text-sm font-bold px-3 py-1 rounded" style="background:rgba(226,183,20,0.15);color:var(--main);letter-spacing:1px;"></div>
             </div>
+            <div id="res-rank" class="text-xl font-bold mb-4" style="color:var(--main);letter-spacing:1px;display:none"></div>
             <div class="grid grid-cols-2 gap-4 mb-8">
                 <div class="bg-gray-800 p-6 rounded-xl"><div class="text-sm text-gray-500">CPM</div><div class="text-6xl font-bold text-yellow-400" id="res-wpm">0</div></div>
                 <div class="bg-gray-800 p-6 rounded-xl"><div class="text-sm text-gray-500">Acuratete</div><div class="text-6xl font-bold text-yellow-400" id="res-acc">0%</div></div>
                 <div class="bg-gray-800 p-4 rounded-xl"><div class="text-sm text-gray-500">Raw CPM</div><div class="text-2xl font-bold" id="res-raw">0</div></div>
                 <div class="bg-gray-800 p-4 rounded-xl"><div class="text-sm text-gray-500">Consistenta</div><div class="text-2xl font-bold text-blue-400" id="res-cons">0%</div></div>
             </div>
-            <div class="text-sm text-gray-500 mb-2">Se reincarca in <span id="reload-seconds" class="font-bold text-white">20</span>s</div>
-            <div class="progress-bar-container">
-                <div id="reload-bar" class="progress-bar-fill" style="width: 100%"></div>
+            <div id="reload-section">
+                <div class="text-sm text-gray-500 mb-2">Se reincarca in <span id="reload-seconds" class="font-bold text-white">20</span>s</div>
+                <div class="progress-bar-container">
+                    <div id="reload-bar" class="progress-bar-fill" style="width: 100%"></div>
+                </div>
             </div>
         </div>
 
@@ -222,7 +225,9 @@
             startTime: 0,
             duration: 60,
             timer: null,
-            reloadTimer: null, // Issue #3/#4: track so it can be cancelled
+            reloadTimer: null,
+            myRank: null,
+            totalPlayers: 0,
             stats: {
                 correctChars: 0,
                 totalChars: 0,
@@ -404,10 +409,8 @@
                     
                 case 'UPDATE_LOBBY': 
                     document.getElementById('waiting-count').textContent = data.count;
-                    if (data.stateVersion && data.stateVersion !== stateVersion) {
-                        console.warn('State desync detected, requesting sync');
-                        ws.send(JSON.stringify({ type: 'REQUEST_STATE_SYNC' }));
-                    }
+                    // Keep local stateVersion in sync so we don't endlessly request syncs
+                    if (data.stateVersion) stateVersion = data.stateVersion;
                     break;
                     
                 case 'COUNTDOWN':
@@ -434,16 +437,47 @@
                     
                 case 'GAME_OVER':
                     if (data.round) currentRound = data.round;
-                    // Issue #8: If game is still active, finalize it; cancel reload timer and go to waiting
-                    if (gameState.active) endGame();
-                    // Cancel auto-reload — multi-round flow: wait for next round
-                    if (!data.isLastRound) {
-                        if (gameState.reloadTimer) {
-                            clearInterval(gameState.reloadTimer);
-                            gameState.reloadTimer = null;
+                    // Store rank from server payload before any screen switch
+                    if (data.rankings && data.rankings.length) {
+                        const _sess = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
+                        if (_sess?.userId) {
+                            const _me = data.rankings.find(r => r.userId === _sess.userId);
+                            if (_me) { gameState.myRank = _me.rank; gameState.totalPlayers = data.totalPlayers; }
                         }
-                        document.getElementById('reload-seconds').textContent = '—';
-                        document.getElementById('reload-bar').style.width = '0%';
+                    }
+                    // If game still running client-side, finalize WITHOUT re-sending FINISH
+                    // (sending FINISH again would overwrite real scores with 0s for idle players)
+                    if (gameState.active) {
+                        gameState.active = false;
+                        clearInterval(gameState.timer);
+                        if (gameState.reloadTimer) { clearInterval(gameState.reloadTimer); gameState.reloadTimer = null; }
+                        // Compute final stats from what we have
+                        const _el = Math.max(1, (getServerTime() - gameState.startTime) / 1000);
+                        const _mins = _el / 60;
+                        const _wpm = Math.round((gameState.stats.correctChars / 5) / _mins);
+                        const _raw = Math.round((gameState.stats.totalChars / 5) / _mins);
+                        const _tt  = gameState.stats.totalChars;
+                        const _acc = _tt === 0 ? 0 : Math.round(((_tt - gameState.stats.errors) / _tt) * 100);
+                        let _cons = 0;
+                        const _sn = gameState.stats.wpmSnapshots;
+                        if (_sn.length >= 2) {
+                            const _m = _sn.reduce((a,b)=>a+b,0)/_sn.length;
+                            const _v = _sn.map(v=>Math.pow(v-_m,2)).reduce((a,b)=>a+b,0)/_sn.length;
+                            _cons = Math.max(0,Math.min(100,Math.round((1-Math.sqrt(_v)/(_m||1))*100)));
+                        }
+                        document.getElementById('res-wpm').textContent = _wpm;
+                        document.getElementById('res-acc').textContent = Math.max(0,_acc)+'%';
+                        document.getElementById('res-raw').textContent = _raw;
+                        document.getElementById('res-cons').textContent = _cons+'%';
+                        updateRoundBadge();
+                        _showRank();
+                        switchScreen('results-screen');
+                    }
+                    // Multi-round: hide reload bar; last round: keep it visible
+                    const _reloadSec = document.getElementById('reload-section');
+                    if (_reloadSec) _reloadSec.style.display = data.isLastRound ? 'block' : 'none';
+                    if (!data.isLastRound && gameState.reloadTimer) {
+                        clearInterval(gameState.reloadTimer); gameState.reloadTimer = null;
                     }
                     break;
 
@@ -552,6 +586,19 @@
         role: 'player' 
     }));
 }
+
+        function _showRank() {
+            const el = document.getElementById('res-rank');
+            if (!el) return;
+            if (gameState.myRank && gameState.totalPlayers) {
+                const medals = ['🥇','🥈','🥉'];
+                const medal = medals[gameState.myRank - 1] || '';
+                el.textContent = medal + ' Locul #' + gameState.myRank + ' din ' + gameState.totalPlayers + ' jucători';
+                el.style.display = 'block';
+            } else {
+                el.style.display = 'none';
+            }
+        }
 
         function changeName() {
             localStorage.removeItem(LS_SESSION);
@@ -848,6 +895,10 @@
             document.getElementById('res-raw').textContent = rawWpm;
             document.getElementById('res-cons').textContent = consistency + '%';
             updateRoundBadge();
+            _showRank();
+            // Show reload section by default — GAME_OVER handler will hide if not last round
+            const _rs = document.getElementById('reload-section');
+            if (_rs) _rs.style.display = 'block';
             
             switchScreen('results-screen');
             
