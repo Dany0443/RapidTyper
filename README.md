@@ -3,7 +3,7 @@
 
 # TypeRace & SpellingBee
 
-A real-time competitive typing platform built for a school festival. Students race to type a given text as fast and accurately as possible, or compete in a spelling bee dictation round — all live, all in the browser, no installs needed on the player side.
+A real-time competitive typing platform built for a school festival. Students race to type a given text as fast and accurately as possible, or compete in a spelling bee dictation round all live, all in the browser, no installs needed on the player side.
 
 Built from scratch for the occasion. Now open source.
 
