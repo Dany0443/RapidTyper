@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>Stream</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+:root {
+    --bg: #323437;
+    --panel: #2c2e31;
+    --main: #e2b714;
+    --sub: #646669;
+    --text: #d1d0c5;
+    --error: #ca4754;
+    --green: #22c55e;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Roboto Mono', monospace;
+    min-height: 100vh;
+    min-height: -webkit-fill-available;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── Layout & Safe Areas ── */
+.safe-top { padding-top: env(safe-area-inset-top); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+.screen { display: none; }
+.screen.active { display: flex; flex-direction: column; flex: 1; }
+.divider { height: 1px; background: rgba(255,255,255,0.06); }
+
+/* ── Status Indicators ── */
+.status-indicator { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.status-green { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.status-yellow { background: #eab308; box-shadow: 0 0 8px #eab308; }
+.status-red { background: var(--error); box-shadow: 0 0 8px var(--error); }
+
+/* ── Buttons ── */
+.btn {
+    background: transparent; color: var(--sub);
+    border: 2px solid transparent; border-radius: 8px;
+    min-height: 44px; padding: 0.6rem 1.4rem;
+    font: 700 0.85rem 'Roboto Mono', monospace;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+    touch-action: manipulation; user-select: none;
+}
+.btn:hover { color: var(--text); border-color: var(--sub); }
+.btn:active { opacity: 0.7; }
+.btn:disabled { opacity: 0.3; pointer-events: none; }
+
+.btn-primary { color: var(--main); border-color: var(--main); }
+.btn-primary:hover, .btn-primary:active { background: var(--main); color: var(--bg); }
+.btn-danger { color: var(--error); border-color: var(--error); }
+.btn-danger:hover, .btn-danger:active { background: var(--error); color: #fff; }
+.btn-w { width: 100%; }
+
+/* ── Inputs ── */
+.field-input {
+    width: 100%;
+    background: rgba(0,0,0,0.2);
+    border: 2px solid var(--sub); border-radius: 8px;
+    color: var(--text);
+    font: 16px 'Roboto Mono', monospace; /* Prevents iOS Zoom */
+    letter-spacing: 0.25em; text-align: center;
+    padding: 0.85rem 1rem; outline: none;
+    transition: all 0.15s ease;
+    appearance: none;
+}
+.field-input:focus { border-color: var(--main); background: rgba(0,0,0,0.4); }
+.field-input.error { border-color: var(--error); animation: shake 0.35s; will-change: transform; }
+
+.field-label {
+    font-size: 0.65rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--sub);
+    margin-bottom: 0.45rem; display: block;
+}
+
+/* ── Video Preview ── */
+#preview-video {
+    width: 100%; aspect-ratio: 16 / 9;
+    background: #1a1b1e; border-radius: 10px;
+    object-fit: cover; border: 2px solid rgba(255,255,255,0.05);
+    display: block;
+}
+
+/* ── Quality Selector ── */
+.q-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
+.q-btn {
+    background: rgba(0,0,0,0.2); border: 2px solid transparent; border-radius: 6px;
+    color: var(--sub); font: 700 0.75rem 'Roboto Mono', monospace;
+    min-height: 44px; padding: 0.5rem;
+    cursor: pointer; text-align: center;
+    transition: all 0.15s; touch-action: manipulation;
+}
+.q-btn:active { opacity: 0.7; }
+.q-btn.active { border-color: var(--main); color: var(--main); background: rgba(226,183,20,0.07); }
+
+/* ── Badges & Logs ── */
+.live-badge {
+    display: none; align-items: center; gap: 6px;
+    font-size: 0.65rem; letter-spacing: 0.12em;
+    text-transform: uppercase; font-weight: 700; color: var(--error);
+}
+.live-badge.active { display: flex; }
+.live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--error); animation: blink 1.2s ease-in-out infinite; }
+.status-log { font-size: 0.68rem; color: var(--sub); min-height: 1.2rem; letter-spacing: 0.03em; }
+
+/* ── Layout Grids ── */
+.ctrl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+
+/* ── Animations & Toasts ── */
+.spin { animation: spin 1s linear infinite; will-change: transform; }
+.toast {
+    position: fixed; bottom: calc(1.5rem + env(safe-area-inset-bottom)); left: 50%;
+    transform: translateX(-50%);
+    background: rgba(202,71,84,0.9); color: #fff;
+    font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em;
+    padding: 0.6rem 1.4rem; border-radius: 6px;
+    opacity: 0; transition: opacity 0.25s;
+    pointer-events: none; white-space: nowrap; z-index: 9999;
+}
+.toast.show { opacity: 1; }
+
+@keyframes shake {
+    0%,100% { transform: translateX(0); }
+    20%,60% { transform: translateX(-6px); }
+    40%,80% { transform: translateX(6px); }
+}
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.2; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Responsive ── */
+@media (max-width: 480px) {
+    #preview-video { border-radius: 8px; }
+    #stop-btn { font-size: 0.95rem !important; }
+}
+@media (min-width: 600px) {
+    .stream-card {
+        max-width: 480px; margin: 0 auto;
+        background: var(--panel); border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.06);
+        padding: 1.25rem;
+    }
+}
+    </style>
+</head>
+
+<body class="min-h-screen flex flex-col safe-top">
+
+    <!-- ══════════════════════════════════
+         HEADER — matches index.html exactly
+         but icon = video camera, title = streamer
+    ══════════════════════════════════ -->
+    <header class="w-full px-5 py-4 flex justify-between items-center"
+            style="border-bottom: 1px solid rgba(255,255,255,0.05)">
+
+        <!-- left: logo -->
+        <div class="flex items-center gap-3">
+            <i class="fa-solid fa-video text-2xl" style="color: var(--main)"></i>
+            <h1 class="text-xl font-bold">stream</h1>
+        </div>
+
+        <!-- right: connection status -->
+        <div class="flex items-center gap-2 text-sm" style="color: var(--sub)">
+            <div id="status-dot" class="status-indicator status-red"></div>
+            <span id="status-text" style="font-size: 0.75rem">disconnected</span>
+        </div>
+    </header>
+
+    <!-- ══════════════════════════════════
+         SCREEN: CONNECTING TO SERVER
+         Shown immediately on load while WS opens
+    ══════════════════════════════════ -->
+    <div id="connecting-screen" class="screen active flex-1 items-center justify-center text-center p-8">
+        <div>
+            <div class="inline-block p-4 rounded-full mb-5"
+                 style="background: rgba(226,183,20,0.1)">
+                <i class="fa-solid fa-circle-notch text-4xl spin" style="color: var(--main)"></i>
+            </div>
+            <h2 class="text-xl font-bold mb-2">Se conectează...</h2>
+            <p class="text-sm" style="color: var(--sub)">Se stabilește conexiunea cu serverul</p>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════
+         SCREEN: AUTH
+         Only shown after WS is open.
+         Camera / stream panel NOT accessible until
+         server responds with STREAM_AUTH_OK.
+    ══════════════════════════════════ -->
+    <div id="auth-screen" class="screen flex-1 items-center justify-center p-6">
+        <div class="w-full" style="max-width: 380px">
+
+            <!-- icon + heading -->
+            <div class="text-center mb-8">
+                <div class="inline-block p-4 rounded-full mb-4"
+                     style="background: rgba(226,183,20,0.1)">
+                    <i class="fa-solid fa-lock text-3xl" style="color: var(--main)"></i>
+                </div>
+                <h2 class="text-2xl font-bold mb-1">Acces Cameră</h2>
+                <p class="text-sm" style="color: var(--sub)">Introdu cheia de acces pentru stream</p>
+            </div>
+
+            <!-- key input -->
+            <div class="mb-5">
+                <label class="field-label" for="stream-key">cheie de acces</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        <i class="fa-solid fa-key" style="color: var(--sub)"></i>
+                    </div>
+                    <input
+                        type="password"
+                        id="stream-key"
+                        class="field-input"
+                        style="padding-left: 3rem; text-align: left; letter-spacing: 0.15em"
+                        placeholder="••••••••"
+                        autocomplete="current-password"
+                        onkeydown="if(event.key==='Enter') submitAuth()">
+                </div>
+                <p id="auth-error" class="text-xs mt-2" style="color:var(--error);display:none;letter-spacing:0.05em">
+                    Cheie incorectă. Încearcă din nou.
+                </p>
+            </div>
+
+            <button class="btn btn-primary btn-w" onclick="submitAuth()" id="auth-btn">
+                <i class="fa-solid fa-arrow-right-to-bracket"></i>
+                Conectare
+            </button>
+
+            <!-- waiting for server response indicator (hidden until key is sent) -->
+            <div id="auth-waiting" class="text-center mt-4" style="display:none">
+                <i class="fa-solid fa-circle-notch spin" style="color:var(--sub);font-size:0.9rem"></i>
+                <span class="text-xs ml-2" style="color:var(--sub)">verificare cheie...</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════
+         SCREEN: STREAM
+         Only unlocked after STREAM_AUTH_OK from server.
+         Camera access requested HERE, not before.
+    ══════════════════════════════════ -->
+    <div id="stream-screen" class="screen flex-1 flex-col safe-bottom">
+
+        <div class="flex-1 flex flex-col gap-4 px-4 py-4 overflow-y-auto">
+        <div class="stream-card" style="width:100%">
+
+            <!-- video preview -->
+            <video
+                id="preview-video"
+                autoplay muted playsinline
+                webkit-playsinline
+                x5-video-player-type="h5"
+                x5-video-player-fullscreen="false"
+                x5-video-orientation="portraint">
+            </video>
+
+            <!-- cam id + live badge row -->
+            <div class="flex items-center justify-between">
+                <span class="text-xs" style="color:var(--sub)">
+                    cam&nbsp;<strong id="cam-id-display" style="color:var(--main)">—</strong>
+                </span>
+                <div class="live-badge" id="live-badge">
+                    <div class="live-dot"></div> live
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <!-- quality selector -->
+            <div>
+                <label class="field-label">calitate video</label>
+                <div class="q-grid">
+                    <button class="q-btn active" onclick="setQuality('hd',this)" id="q-hd">720p</button>
+                    <button class="q-btn"        onclick="setQuality('fhd',this)">1080p</button>
+                    <button class="q-btn"        onclick="setQuality('4k',this)">4K</button>
+                </div>
+            </div>
+
+            <!-- camera controls -->
+            <div class="ctrl-grid">
+                <button class="btn" id="flip-btn" onclick="flipCamera()">
+                    <i class="fa-solid fa-rotate"></i> flip
+                </button>
+                <button class="btn btn-primary" id="start-btn" onclick="startStream()">
+                    <i class="fa-solid fa-circle"></i> start live
+                </button>
+            </div>
+
+            <!-- STOP button — always full width, very visible when live -->
+            <button class="btn btn-danger" id="stop-btn"
+                    onclick="stopStream()" style="display:none; width:100%; font-size:1rem; min-height:52px;">
+                <i class="fa-solid fa-square"></i> oprește stream
+            </button>
+
+            <!-- status log -->
+            <div class="status-log" id="status-log">pregătit · cameră inițializată</div>
+
+            <div class="divider"></div>
+
+        </div><!-- /stream-card -->
+        </div><!-- /overflow wrapper -->
+    </div>
+
+    <!-- toast for errors -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+    // ════════════════════════════════════════════════════════════
+    //  CONFIG
+    // ════════════════════════════════════════════════════════════
+    const WS_URL = location.hostname === 'localhost' || location.hostname === '127.0.0.1'
+    ? `ws://${location.hostname}:5889` 
+    : `wss://typer.webjuniors.org/ws`;
+
+    // ════════════════════════════════════════════════════════════
+    //  STATE
+    // ════════════════════════════════════════════════════════════
+    let ws            = null;
+    let authed        = false;   // true only after STREAM_AUTH_OK
+    let localStream   = null;
+    let peerConns     = {};      // viewerId -> RTCPeerConnection
+    let streaming     = false;
+    let facingMode    = 'environment';
+    let camId         = 'cam-' + Math.random().toString(36).substr(2, 5).toUpperCase();
+    let quality       = { width: 1280, height: 720 };
+    let reconnectAttempts = 0;
+    let pingInterval  = null;
+
+    const qualityMap = {
+        hd:  { width: 1280, height: 720  },
+        fhd: { width: 1920, height: 1080 },
+        '4k':{ width: 3840, height: 2160 }
+    };
+
+    // ════════════════════════════════════════════════════════════
+    //  SCREEN MANAGEMENT
+    // ════════════════════════════════════════════════════════════
+    function showScreen(id) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  TOAST
+    // ════════════════════════════════════════════════════════════
+    let toastTimer = null;
+    function showToast(msg) {
+        const t = document.getElementById('toast');
+        t.textContent = msg;
+        t.classList.add('show');
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  STATUS DOT
+    // ════════════════════════════════════════════════════════════
+    function setStatus(state, text) {
+        // state: 'green' | 'yellow' | 'red'
+        const dot = document.getElementById('status-dot');
+        dot.className = 'status-indicator status-' + state;
+        document.getElementById('status-text').textContent = text;
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  WEBSOCKET — connects on page load, NOT gated by auth
+    //  but NO stream data flows until authed = true
+    // ════════════════════════════════════════════════════════════
+    function connectWS() {
+        setStatus('yellow', 'connecting...');
+        ws = new WebSocket(WS_URL);
+
+        ws.onopen = () => {
+            reconnectAttempts = 0;
+            setStatus('yellow', 'connected · needs auth');
+            // WS is open — now show the auth form
+            showScreen('auth-screen');
+            startPing();
+        };
+
+        ws.onmessage = (e) => {
+            let msg;
+            try { msg = JSON.parse(e.data); } catch { return; }
+            handleServerMessage(msg);
+        };
+
+        ws.onclose = () => {
+            setStatus('red', 'disconnected');
+            authed = false;
+            stopPing();
+            // If mid-stream, stop cleanly
+            if (streaming) forceStopStream();
+            // Show connecting screen, retry
+            showScreen('connecting-screen');
+            const delay = Math.min(1500 * Math.pow(1.5, reconnectAttempts), 20000);
+            reconnectAttempts++;
+            setTimeout(connectWS, delay);
+        };
+
+        ws.onerror = () => setStatus('red', 'error');
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  SERVER MESSAGE HANDLER
+    //  SECURITY: all stream-related messages are ignored until
+    //  authed === true. The server also enforces this on its side.
+    // ════════════════════════════════════════════════════════════
+    async function handleServerMessage(msg) {
+        switch (msg.type) {
+
+            // ── AUTH RESPONSE ────────────────────────────────────
+            case 'STREAM_AUTH_OK':
+                authed = true;
+                setStatus('green', 'autentificat');
+                hideAuthWaiting();
+                // ONLY NOW request camera and show stream UI
+                await initCamera();
+                showScreen('stream-screen');
+                document.getElementById('cam-id-display').textContent = camId;
+                // Start keeping screen on from this point forward
+                await acquireWakeLock();
+                log('cameră pornită · pregătit de stream');
+                break;
+
+            case 'STREAM_AUTH_FAIL':
+                authed = false;
+                hideAuthWaiting();
+                setStatus('yellow', 'connected · needs auth');
+                showAuthError('Cheie incorectă. Încearcă din nou.');
+                re_enableAuthBtn();
+                break;
+
+            // ── STREAM SIGNALING (only processed if authed) ──────
+            case 'VIEWER_JOINED':
+                if (!authed) return;
+                log('viewer conectat · ' + msg.viewerId.substr(0, 8));
+                await createOffer(msg.viewerId);
+                break;
+
+            case 'STREAM_ANSWER':
+                if (!authed) return;
+                if (peerConns[msg.viewerId]) {
+                    await peerConns[msg.viewerId]
+                          .setRemoteDescription({ type: 'answer', sdp: msg.sdp })
+                          .catch(() => {});
+                }
+                break;
+
+            case 'STREAM_ICE':
+                if (!authed) return;
+                if (peerConns[msg.viewerId] && msg.candidate) {
+                    peerConns[msg.viewerId]
+                        .addIceCandidate(msg.candidate)
+                        .catch(() => {});
+                }
+                break;
+
+            case 'VIEWER_LEFT':
+                if (!authed) return;
+                closePeer(msg.viewerId);
+                break;
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  AUTH FLOW
+    // ════════════════════════════════════════════════════════════
+    function submitAuth() {
+        const key = document.getElementById('stream-key').value.trim();
+        if (!key) {
+            shakeInput();
+            return;
+        }
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            showToast('Nu ești conectat la server');
+            return;
+        }
+
+        // Disable button + show spinner while waiting for server
+        document.getElementById('auth-btn').disabled = true;
+        document.getElementById('auth-waiting').style.display = 'block';
+        document.getElementById('auth-error').style.display = 'none';
+
+        // Send key to server — response comes back as STREAM_AUTH_OK / STREAM_AUTH_FAIL
+        ws.send(JSON.stringify({
+            type: 'STREAM_AUTH',
+            key: key,
+            camId: camId,
+            role: 'streamer'
+        }));
+    }
+
+    function hideAuthWaiting() {
+        document.getElementById('auth-waiting').style.display = 'none';
+    }
+
+    function showAuthError(msg) {
+        const el = document.getElementById('auth-error');
+        el.textContent = msg;
+        el.style.display = 'block';
+        shakeInput();
+    }
+
+    function re_enableAuthBtn() {
+        const btn = document.getElementById('auth-btn');
+        btn.disabled = false;
+    }
+
+    function shakeInput() {
+        const el = document.getElementById('stream-key');
+        el.classList.add('error');
+        el.value = '';
+        setTimeout(() => el.classList.remove('error'), 500);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  CAMERA — only called after auth success
+    // ════════════════════════════════════════════════════════════
+    async function initCamera() {
+        try {
+            if (localStream) localStream.getTracks().forEach(t => t.stop());
+
+            // iOS requires exact constraints to be minimal — start with ideal
+            const constraints = {
+                video: {
+                    facingMode: { ideal: facingMode },
+                    width:  { ideal: quality.width  },
+                    height: { ideal: quality.height },
+                    // helps on older iPhones
+                    frameRate: { ideal: 30, max: 60 }
+                },
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    // avoid issues on some Android devices
+                    channelCount: 1
+                }
+            };
+
+            localStream = await navigator.mediaDevices.getUserMedia(constraints);
+            const vid = document.getElementById('preview-video');
+            vid.srcObject = localStream;
+
+            // iOS sometimes needs a manual play() call
+            try { await vid.play(); } catch (_) {}
+
+        } catch (err) {
+            log('eroare cameră: ' + err.message);
+            showToast('Eroare cameră: ' + err.message);
+        }
+    }
+
+    function setQuality(key, btn) {
+        if (streaming) { showToast('Oprește stream-ul mai întâi'); return; }
+        document.querySelectorAll('.q-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        quality = qualityMap[key];
+        // Re-init camera with new quality (only if already authed)
+        if (authed && localStream) initCamera();
+    }
+
+    function flipCamera() {
+        if (streaming) { showToast('Oprește stream-ul pentru a schimba camera'); return; }
+        facingMode = facingMode === 'environment' ? 'user' : 'environment';
+        if (authed) initCamera();
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  STREAM START / STOP
+    //  Security: send() is wrapped — silently ignored if !authed
+    // ════════════════════════════════════════════════════════════
+    function safeSend(payload) {
+        if (!authed || !ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify(payload));
+    }
+
+    async function startStream() {
+        if (!authed)        { showToast('Autentifică-te mai întâi'); return; }
+        if (!localStream)   { showToast('Nicio cameră disponibilă'); return; }
+        if (streaming)      return;
+
+        streaming = true;
+        document.getElementById('start-btn').style.display = 'none';
+        document.getElementById('stop-btn').style.display  = 'flex';
+        document.getElementById('live-badge').classList.add('active');
+        document.getElementById('flip-btn').disabled = true;
+
+        safeSend({ type: 'STREAM_START', camId, label: camId });
+        await acquireWakeLock();
+        log('live · stream activ');
+    }
+
+    function stopStream() {
+        if (!streaming) return;
+        streaming = false;
+
+        document.getElementById('start-btn').style.display = 'flex';
+        document.getElementById('stop-btn').style.display  = 'none';
+        document.getElementById('live-badge').classList.remove('active');
+        document.getElementById('flip-btn').disabled = false;
+
+        Object.keys(peerConns).forEach(id => closePeer(id));
+
+        safeSend({ type: 'STREAM_STOP', camId });
+        log('stream oprit');
+    }
+
+    function forceStopStream() {
+        streaming = false;
+        Object.keys(peerConns).forEach(id => closePeer(id));
+        document.getElementById('start-btn').style.display  = 'flex';
+        document.getElementById('stop-btn').style.display   = 'none';
+        document.getElementById('live-badge').classList.remove('active');
+        document.getElementById('flip-btn').disabled = false;
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  WebRTC
+    // ════════════════════════════════════════════════════════════
+    async function createOffer(viewerId) {
+        if (!streaming || !localStream || !authed) return;
+
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302'  },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        });
+        peerConns[viewerId] = pc;
+
+        // Add all tracks
+        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+        pc.onicecandidate = (e) => {
+            if (e.candidate) {
+                safeSend({
+                    type: 'STREAM_ICE',
+                    candidate: e.candidate,
+                    viewerId,
+                    from: 'streamer',
+                    camId
+                });
+            }
+        };
+
+        pc.onconnectionstatechange = () => {
+            if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                closePeer(viewerId);
+            }
+        };
+
+        const offer = await pc.createOffer({
+            offerToReceiveAudio: false,
+            offerToReceiveVideo: false
+        });
+        await pc.setLocalDescription(offer);
+
+        safeSend({ type: 'STREAM_OFFER', sdp: offer.sdp, viewerId, camId });
+    }
+
+    function closePeer(viewerId) {
+        if (peerConns[viewerId]) {
+            try { peerConns[viewerId].close(); } catch (_) {}
+            delete peerConns[viewerId];
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  HELPERS
+    // ════════════════════════════════════════════════════════════
+    function log(msg) {
+        document.getElementById('status-log').textContent = msg;
+    }
+
+    function startPing() {
+        stopPing();
+        pingInterval = setInterval(() => {
+            if (ws?.readyState === WebSocket.OPEN)
+                ws.send(JSON.stringify({ type: 'PING' }));
+        }, 25000);
+    }
+
+    function stopPing() {
+        if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  WAKE LOCK — aggressive, always-on once streaming starts
+    //  Tries every possible method to keep the screen alive.
+    //  Re-acquires automatically on any release event.
+    // ════════════════════════════════════════════════════════════
+    let wakeLock = null;
+    let wakeLockRetryTimer = null;
+
+    async function acquireWakeLock() {
+        // Method 1: Screen Wake Lock API (Chrome 84+, Safari 16.4+)
+        if ('wakeLock' in navigator) {
+            try {
+                if (wakeLock && wakeLock.released === false) return; // already held
+                wakeLock = await navigator.wakeLock.request('screen');
+                wakeLock.addEventListener('release', () => {
+                    // Re-acquire immediately if it got released by the OS
+                    if (streaming || authed) {
+                        scheduleWakeLockRetry();
+                    }
+                });
+                return; // success
+            } catch (_) {}
+        }
+
+        // Method 2: NoSleep fallback — play a tiny silent video loop
+        // This keeps the screen on in browsers that don't support Wake Lock API
+        startNoSleepVideo();
+    }
+
+    function scheduleWakeLockRetry() {
+        if (wakeLockRetryTimer) clearTimeout(wakeLockRetryTimer);
+        // Retry after 500ms — handles the case where OS releases it momentarily
+        wakeLockRetryTimer = setTimeout(acquireWakeLock, 500);
+    }
+
+    // NoSleep fallback: a 1x1 transparent video loop tricks browsers
+    // into thinking media is playing, preventing sleep
+    let noSleepVideo = null;
+    function startNoSleepVideo() {
+        if (noSleepVideo) return;
+        noSleepVideo = document.createElement('video');
+        noSleepVideo.setAttribute('playsinline', '');
+        noSleepVideo.setAttribute('webkit-playsinline', '');
+        noSleepVideo.muted = true;
+        noSleepVideo.loop = true;
+        // Minimal valid MP4 — a 1×1 black frame, 1s, base64
+        noSleepVideo.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAA3JtZGF0AAACrQYF//+p3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE1NSByMjkwMSBhOWY5NmE4IC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAxOCAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAAFZliIQAV/8EKAAABQAA=';
+        noSleepVideo.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0.01;pointer-events:none;';
+        document.body.appendChild(noSleepVideo);
+        noSleepVideo.play().catch(() => {});
+    }
+
+    function stopNoSleepVideo() {
+        if (noSleepVideo) {
+            noSleepVideo.pause();
+            noSleepVideo.remove();
+            noSleepVideo = null;
+        }
+    }
+
+    // Re-acquire on every possible lifecycle event
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && (streaming || authed)) {
+            acquireWakeLock();
+        }
+    });
+    window.addEventListener('focus', () => {
+        if (streaming || authed) acquireWakeLock();
+    });
+    window.addEventListener('pageshow', () => {
+        if (streaming || authed) acquireWakeLock();
+    });
+    // Some Android browsers fire this when the screen un-dims
+    document.addEventListener('resume', () => {
+        if (streaming || authed) acquireWakeLock();
+    });
+
+    // ════════════════════════════════════════════════════════════
+    //  INIT — connect to WS immediately on load
+    // ════════════════════════════════════════════════════════════
+    window.addEventListener('load', () => {
+        connectWS();
+    });
+    </script>
+
+</body>
+</html>
