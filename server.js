@@ -50,6 +50,22 @@ const FILES = {
 const wss = new WebSocket.Server({ port: 5889 });
 // Issue #15: Hardcoded admin key — load from env with fallback
 const ADMIN_KEY = process.env.ADMIN_KEY || "1313";
+const STREAM_KEY = process.env.STREAM_KEY || 'stream1234';
+
+// School node registry: schoolId → { ws, schoolId, cameras[], httpPort, etc }
+const schoolNodes = new Map();
+
+// Camera registry: `${schoolId}::${camId}` → { schoolId, camId, label, streaming, lastThumb }
+const allCameras  = new Map();
+
+// Presentation screen assignments: presentationWsId → { activeCamKey }
+// presentationWsId is generated per connection
+const presentationAssignments = new Map();
+
+// For generating per-WS IDs
+let wsIdCounter = 0;
+function nextWsId() { return 'ws_' + (++wsIdCounter); }
+
 let GAME_DURATION = 60; // mutable — host can change via SET_DURATION
 const MAX_PLAYERS = 200; // Issue #20: Max player cap
 
@@ -604,6 +620,50 @@ wss.on('connection', (ws, req) => {
             ws.send(JSON.stringify({ type: 'ERROR', message: 'Message too large' }));
             return;
         }
+
+        // Binary message = video chunk or thumbnail from a school node
+        if (message instanceof Buffer && message[0] !== 0x7b) {
+            let header = null;
+            try {
+                header = JSON.parse(message.subarray(0, 256).toString().replace(/\0+$/, ''));
+            } catch (err) {
+                logger.warn(`Invalid binary header from ${ws.clientIp}`);
+                return;
+            }
+
+            const payload = message.subarray(256);
+
+            if (header.type === 'CAM_THUMBNAIL') {
+                const b64 = payload.toString('base64');
+                const outMsg = JSON.stringify({
+                    type: 'CAM_THUMBNAIL',
+                    schoolId: header.schoolId,
+                    camId: header.camId,
+                    camKey: `${header.schoolId}::${header.camId}`,
+                    jpeg: b64,
+                    ts: header.ts
+                });
+
+                for (let [clientWs, player] of gameState.state.players.entries()) {
+                    if ((player.role === 'admin' || player.role === 'viewer')
+                        && clientWs.readyState === WebSocket.OPEN) {
+                        try { clientWs.send(outMsg); } catch(e) {}
+                    }
+                }
+            }
+
+            if (header.type === 'VIDEO_CHUNK') {
+                const camKey = `${header.schoolId}::${header.camId}`;
+                for (let [clientWs, player] of gameState.state.players.entries()) {
+                    if (player.role === 'viewer'
+                        && clientWs._viewingCam === camKey
+                        && clientWs.readyState === WebSocket.OPEN) {
+                        try { clientWs.send(message); } catch(e) {}
+                    }
+                }
+            }
+            return;
+        }
         
         try {
             const data = JSON.parse(message);
@@ -832,14 +892,19 @@ async function handleMessage(ws, data) {
                 }
                 break;
 
-            case 'PRESENTATION_JOIN':
-                gameState.state.players.set(ws, { role: 'viewer', username: 'Screen' });
+            case 'PRESENTATION_JOIN': {
+                const presId = ws._wsId || (ws._wsId = nextWsId());
+                gameState.state.players.set(ws, { role: 'viewer', username: 'Screen', wsId: presId });
                 ws.send(JSON.stringify({
                     type: 'FULL_STATE_SYNC',
-                    state: gameState.getState()
+                    state: gameState.getState(),
+                    wsId: presId,
+                    cameras: getCamerasSummary(),
+                    schoolNodes: getSchoolNodesSummary()
                 }));
                 broadcastLobbyState();
                 break;
+            }
 
             case 'JOIN':
             case 'RECONNECT':
@@ -849,8 +914,17 @@ async function handleMessage(ws, data) {
             case 'JOIN_SPELL': {
                 const rawSpellId = typeof data.userId === 'string' ? data.userId : '';
                 const spellUserId = rawSpellId.replace(/[^a-zA-Z0-9_\-]/g, '').substring(0, 64) || ('sp_' + Date.now());
-                const spellUsername = ((typeof data.username === 'string' ? data.username : 'Guest')
+                const rawSpellUsername = ((typeof data.username === 'string' ? data.username : 'Guest')
                     .replace(/[<>]/g, '').substring(0, 15).trim()) || 'Guest';
+                const spellUsername = deduplicateUsername(rawSpellUsername, ws);
+                if (spellUsername !== rawSpellUsername) {
+                    ws.send(JSON.stringify({
+                        type: 'USERNAME_CHANGED',
+                        original: rawSpellUsername,
+                        assigned: spellUsername,
+                        reason: 'Name already in use'
+                    }));
+                }
                 const SPELL_VALID_GRADES = ['1-4', '5-9', '10-12'];
                 const spellGrade = SPELL_VALID_GRADES.includes(data.grade) ? data.grade : '1-4';
                 
@@ -1128,6 +1202,212 @@ async function handleMessage(ws, data) {
                 }));
                 break;
 
+            // School node registration / camera updates
+            case 'SCHOOL_REGISTER': {
+                const { schoolId, httpPort, localPort, videoPort, maxCams } = data;
+                if (!schoolId) break;
+
+                gameState.state.players.set(ws, { role: 'school_node', schoolId, username: schoolId });
+                ws._wsId = ws._wsId || nextWsId();
+
+                schoolNodes.set(schoolId, {
+                    ws,
+                    schoolId,
+                    httpPort,
+                    localPort,
+                    videoPort,
+                    maxCams,
+                    connectedAt: Date.now(),
+                    cameras: []
+                });
+
+                ws.send(JSON.stringify({ type: 'SCHOOL_REGISTER_OK', schoolId }));
+                sysLog(`🏫 School node registered: ${schoolId}`);
+
+                broadcastToHosts({
+                    type: 'SCHOOL_NODES_UPDATE',
+                    nodes: getSchoolNodesSummary()
+                });
+                break;
+            }
+
+            case 'SCHOOL_CAMERAS_UPDATE': {
+                const node = schoolNodes.get(data.schoolId);
+                if (!node) break;
+
+                const newKeys = new Set();
+                (data.cameras || []).forEach(cam => {
+                    const key = `${data.schoolId}::${cam.camId}`;
+                    newKeys.add(key);
+                    allCameras.set(key, {
+                        ...cam,
+                        schoolId: data.schoolId,
+                        lastSeen: Date.now()
+                    });
+                });
+
+                for (let [key, cam] of allCameras.entries()) {
+                    if (cam.schoolId === data.schoolId && !newKeys.has(key)) {
+                        allCameras.delete(key);
+                    }
+                }
+
+                node.cameras = data.cameras || [];
+                sysLog(`📷 ${data.schoolId}: ${node.cameras.length} cameras`);
+
+                broadcastToHosts({
+                    type: 'CAMERAS_UPDATE',
+                    cameras: getCamerasSummary()
+                });
+                break;
+            }
+
+            case 'JOIN':
+            case 'RECONNECT':
+            case 'JOIN_SPELL':
+            case 'PROGRESS_UPDATE':
+            case 'FINISH':
+            case 'SPELL_SUBMIT_FULL': {
+                if ((data.type === 'JOIN' || data.type === 'RECONNECT') && data.username) {
+                    data.username = deduplicateUsername(data.username, ws);
+                }
+                if (data.type === 'JOIN_SPELL' && data.username) {
+                    data.username = deduplicateUsername(data.username, ws);
+                }
+                await handleJoin(ws, data);
+                break;
+            }
+
+            case 'SCHOOL_STREAM_ANSWER': {
+                const targetNode = schoolNodes.get(data.schoolId);
+                if (targetNode?.ws.readyState === WebSocket.OPEN) {
+                    targetNode.ws.send(JSON.stringify(data));
+                }
+                break;
+            }
+
+            case 'SCHOOL_STREAM_ICE': {
+                const targetNode2 = schoolNodes.get(data.schoolId);
+                if (targetNode2?.ws.readyState === WebSocket.OPEN) {
+                    targetNode2.ws.send(JSON.stringify(data));
+                }
+                break;
+            }
+
+            case 'SCHOOL_STREAM_OFFER': {
+                const viewerWs = findViewerByViewerId(data.viewerId);
+                if (viewerWs?.readyState === WebSocket.OPEN) {
+                    viewerWs.send(JSON.stringify({
+                        type: 'STREAM_OFFER',
+                        camId: data.camId,
+                        schoolId: data.schoolId,
+                        sdp: data.sdp,
+                        viewerId: data.viewerId
+                    }));
+                }
+                break;
+            }
+
+            case 'SCHOOL_STREAM_ICE_FROM_CAM': {
+                const viewerWs2 = findViewerByViewerId(data.viewerId);
+                if (viewerWs2?.readyState === WebSocket.OPEN) {
+                    viewerWs2.send(JSON.stringify({
+                        type: 'STREAM_ICE_FROM_CAM',
+                        camId: data.camId,
+                        schoolId: data.schoolId,
+                        candidate: data.candidate
+                    }));
+                }
+                break;
+            }
+
+            case 'HOST_VIEW_CAM': {
+                const hostPlayer = gameState.state.players.get(ws);
+                if (hostPlayer?.role !== 'admin') break;
+
+                const viewerId = 'host-viewer-' + nextWsId();
+                ws._wsId = ws._wsId || viewerId;
+
+                const targetSchool = schoolNodes.get(data.schoolId);
+                if (targetSchool?.ws.readyState === WebSocket.OPEN) {
+                    targetSchool.ws.send(JSON.stringify({
+                        type: 'VIEW_CAM_REQUEST',
+                        schoolId: data.schoolId,
+                        camId: data.camId,
+                        viewerId
+                    }));
+                    ws._viewerId = viewerId;
+                    ws._viewingCam = `${data.schoolId}::${data.camId}`;
+                    sysLog(`👁️ Host viewing cam ${data.camId} @ ${data.schoolId}`);
+                } else {
+                    ws.send(JSON.stringify({ type: 'CAM_NOT_FOUND', camId: data.camId }));
+                }
+                break;
+            }
+
+            case 'STREAM_ANSWER': {
+                if (ws._viewingCam) {
+                    const [schoolId, camId] = ws._viewingCam.split('::');
+                    const school = schoolNodes.get(schoolId);
+                    if (school?.ws.readyState === WebSocket.OPEN) {
+                        school.ws.send(JSON.stringify({
+                            type: 'SCHOOL_STREAM_ANSWER',
+                            schoolId,
+                            camId,
+                            sdp: data.sdp,
+                            viewerId: ws._viewerId
+                        }));
+                    }
+                }
+                break;
+            }
+
+            case 'STREAM_ICE': {
+                if (ws._viewingCam) {
+                    const [schoolId2, camId2] = ws._viewingCam.split('::');
+                    const school2 = schoolNodes.get(schoolId2);
+                    if (school2?.ws.readyState === WebSocket.OPEN) {
+                        school2.ws.send(JSON.stringify({
+                            type: 'SCHOOL_STREAM_ICE',
+                            schoolId: schoolId2,
+                            camId: camId2,
+                            candidate: data.candidate,
+                            viewerId: ws._viewerId
+                        }));
+                    }
+                }
+                break;
+            }
+
+            case 'PRESENTATION_SET_CAM': {
+                const presPlayer = gameState.state.players.get(ws);
+                if (presPlayer?.role !== 'viewer') break;
+                const presId = ws._wsId || (ws._wsId = nextWsId());
+                presentationAssignments.set(presId, {
+                    schoolId: data.schoolId,
+                    camId: data.camId,
+                    camKey: `${data.schoolId}::${data.camId}`
+                });
+                const viewerId2 = 'pres-' + presId;
+                ws._viewerId = viewerId2;
+                ws._viewingCam = `${data.schoolId}::${data.camId}`;
+
+                const school3 = schoolNodes.get(data.schoolId);
+                if (school3?.ws.readyState === WebSocket.OPEN) {
+                    school3.ws.send(JSON.stringify({
+                        type: 'VIEW_CAM_REQUEST',
+                        schoolId: data.schoolId,
+                        camId: data.camId,
+                        viewerId: viewerId2
+                    }));
+                }
+                broadcastToHosts({
+                    type: 'PRESENTATION_ASSIGNMENTS',
+                    assignments: getPresentationAssignments()
+                });
+                break;
+            }
+
             default:
                 logger.warn(`Unknown message type: ${data.type}`);
                 debugLog(`Unknown message details: ${JSON.stringify(data)}`);
@@ -1140,6 +1420,62 @@ async function handleMessage(ws, data) {
             message: 'Server error occurred' 
         }));
     }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Helper functions for school/presentation features
+// ═════════════════════════════════════════════════════════════════════════
+
+function broadcastToHosts(msg) {
+    const data = JSON.stringify(msg);
+    for (let [ws, player] of gameState.state.players.entries()) {
+        if (player.role === 'admin' && ws.readyState === WebSocket.OPEN) {
+            try { ws.send(data); } catch(e) {}
+        }
+    }
+}
+
+function getSchoolNodesSummary() {
+    const out = [];
+    for (let [id, node] of schoolNodes.entries()) {
+        out.push({
+            schoolId: id,
+            cameras: node.cameras.length,
+            online: node.ws.readyState === WebSocket.OPEN,
+            httpPort: node.httpPort
+        });
+    }
+    return out;
+}
+
+function getCamerasSummary() {
+    const out = [];
+    for (let [key, cam] of allCameras.entries()) {
+        out.push({
+            key,
+            camId: cam.camId,
+            schoolId: cam.schoolId,
+            label: cam.label,
+            streaming: cam.streaming
+        });
+    }
+    return out;
+}
+
+function getPresentationAssignments() {
+    const out = {};
+    for (let [presId, asgn] of presentationAssignments.entries()) {
+        out[presId] = asgn;
+    }
+    return out;
+}
+
+function findViewerByViewerId(viewerId) {
+    if (!viewerId) return null;
+    for (let [ws, player] of gameState.state.players.entries()) {
+        if (ws._viewerId === viewerId) return ws;
+    }
+    return null;
 }
 
 // ============ TIME SYNCHRONIZATION ============
@@ -1165,6 +1501,29 @@ async function handleTimeSync(ws, data) {
     }));
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// Duplicate name deduplication helper
+// ═════════════════════════════════════════════════════════════════════════
+
+function deduplicateUsername(desiredName, excludeWs = null) {
+    const takenNames = new Set(
+        Array.from(gameState.state.players.values())
+            .filter(p => p.role === 'player' || p.role === 'speller')
+            .map(p => p.username.toLowerCase())
+    );
+
+    // First, try the exact name
+    if (!takenNames.has(desiredName.toLowerCase())) return desiredName;
+
+    // Try appending 2, 3, 4, ...
+    for (let i = 2; i <= 99; i++) {
+        const candidate = `${desiredName} ${i}`;
+        if (!takenNames.has(candidate.toLowerCase())) return candidate;
+    }
+    return desiredName + ' ' + Date.now(); // absolute fallback
+}
+
+
 // ============ JOIN HANDLING ============
 async function handleJoin(ws, data) {
     if (data.role === 'admin') return;
@@ -1172,8 +1531,17 @@ async function handleJoin(ws, data) {
     // Input validation — sanitise before anything else
     const rawUserId = typeof data.userId === 'string' ? data.userId : '';
     const userId = rawUserId.replace(/[^a-zA-Z0-9_\-]/g, '').substring(0, 64) || ('u_' + Date.now());
-    const username = (typeof data.username === 'string' ? data.username : 'Guest')
+    const rawUsername = (typeof data.username === 'string' ? data.username : 'Guest')
         .replace(/[<>]/g, '').substring(0, 15).trim() || 'Guest';
+    const username = deduplicateUsername(rawUsername, ws);
+    if (username !== rawUsername) {
+        ws.send(JSON.stringify({
+            type: 'USERNAME_CHANGED',
+            original: rawUsername,
+            assigned: username,
+            reason: 'Name already in use'
+        }));
+    }
     const VALID_GRADES = ['1-4', '5-9', '10-12'];
     const grade = VALID_GRADES.includes(data.grade) ? data.grade : '1-4';
 

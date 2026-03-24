@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SpellingBee - Client</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <link rel="stylesheet" href="../css/spell.css"></link>
+</head>
+<body class="min-h-screen flex flex-col">
+
+<header class="w-full p-6 flex justify-between items-center">
+    <div class="flex items-center gap-3 cursor-pointer" onclick="location.reload()">
+        <i class="fa-solid fa-spell-check text-3xl" style="color:var(--main)"></i>
+        <h1 class="text-2xl font-bold">Spelling<span style="color:var(--main)">Bee</span></h1>
+    </div>
+    <div class="flex items-center gap-4 text-sm" style="color:var(--sub)">
+        <div class="flex items-center gap-2">
+            <div id="status-dot" class="status-indicator status-red"></div>
+            <span id="status-text">Connecting...</span>
+        </div>
+        <div class="flex items-center gap-2">
+            <i class="fa-solid fa-user"></i>
+            <span id="display-name">Guest</span>
+        </div>
+        <button onclick="changeName()" class="btn text-xs px-3 py-1" id="change-name-btn" style="display:none">Schimbă Numele</button>
+    </div>
+</header>
+
+<main class="flex-1 flex items-center justify-center p-6">
+
+    <!-- CONNECTING -->
+    <div id="connecting-screen" class="screen active text-center max-w-md w-full p-6">
+        <div class="inline-block p-4 rounded-full mb-6" style="background:rgba(226,183,20,0.1)">
+            <i class="fa-solid fa-circle-notch fa-spin text-4xl" style="color:var(--main)"></i>
+        </div>
+        <h2 class="text-2xl font-bold mb-2">Se conectează...</h2>
+        <p class="text-sm" style="color:var(--sub)">Se stabilește conexiunea cu serverul</p>
+    </div>
+
+    <!-- LOGIN -->
+    <div id="login-screen" class="screen text-center max-w-md w-full p-6">
+        <div class="mb-10">
+            <div class="inline-block p-4 rounded-full mb-4" style="background:rgba(226,183,20,0.1)">
+                <i class="fa-solid fa-user-astronaut text-4xl" style="color:var(--main)"></i>
+            </div>
+            <h2 class="text-3xl font-bold">Bine ai venit!</h2>
+        </div>
+        <div class="mb-8 text-left">
+            <label class="text-xs font-bold ml-1 uppercase tracking-wider mb-2 block" style="color:var(--sub)">Nume Utilizator</label>
+            <div class="relative">
+                <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                    <i class="fa-solid fa-user" style="color:var(--sub)"></i>
+                </div>
+                <input type="text" id="username-input"
+                    class="w-full rounded-lg pl-12 pr-4 py-4 outline-none font-bold transition-all"
+                    style="background:rgba(0,0,0,0.2);border:2px solid var(--sub);color:var(--text)"
+                    placeholder="Introdu un Nume" maxlength="15" autocomplete="off"
+                    onfocus="this.style.borderColor='var(--main)';this.style.background='rgba(0,0,0,0.4)'"
+                    onblur="this.style.borderColor='var(--sub)';this.style.background='rgba(0,0,0,0.2)'"
+                    onkeydown="if(event.key==='Enter') joinGame()">
+            </div>
+        </div>
+        <div class="mb-10 text-left">
+            <label class="text-xs font-bold ml-1 uppercase tracking-wider mb-2 block" style="color:var(--sub)">Selectează Clasa</label>
+            <div class="grid grid-cols-3 gap-3" id="grade-buttons">
+                <button onclick="selectGrade('1-4',this)" class="grade-btn btn w-full px-2 whitespace-nowrap" style="background:rgba(0,0,0,0.2)">1 - 4</button>
+                <button onclick="selectGrade('5-9',this)" class="grade-btn btn w-full px-2 whitespace-nowrap" style="background:rgba(0,0,0,0.2)">5 - 9</button>
+                <button onclick="selectGrade('10-12',this)" class="grade-btn btn w-full px-2 whitespace-nowrap" style="background:rgba(0,0,0,0.2)">10 - 12</button>
+            </div>
+        </div>
+        <button onclick="joinGame()" class="btn btn-primary w-full py-4 text-lg flex items-center justify-center gap-3 hover:scale-[1.02] active:scale-[0.98] transition-transform">
+            <span>Intră</span><i class="fa-solid fa-arrow-right"></i>
+        </button>
+    </div>
+
+    <!-- WAITING -->
+    <div id="waiting-screen" class="screen text-center">
+        <div style="animation:pulse 2.5s ease-in-out infinite">
+            <i class="fa-solid fa-ear-listen text-6xl mb-6 block" style="color:var(--main)"></i>
+        </div>
+        <h2 id="waiting-title" class="text-3xl font-bold mb-2">Așteptare...</h2>
+        <div id="spell-wait-round" class="text-sm mt-1 mb-8" style="color:var(--sub);letter-spacing:2px"></div>
+        <div class="card p-4 inline-block min-w-[200px]">
+            <p class="text-xs mb-1" style="color:var(--sub)">Speleri Conectați</p>
+            <p class="text-4xl font-bold" id="waiting-count">0</p>
+        </div>
+    </div>
+
+    <!-- GAME: word-by-word dictation -->
+    <div id="game-screen" class="screen w-full max-w-4xl">
+
+        <!-- Top bar -->
+        <div class="flex justify-between items-center mb-4">
+            <div>
+                <div class="text-xs uppercase tracking-widest mb-1" style="color:var(--sub)">Dictare</div>
+                <div id="spell-round-badge" class="font-bold text-sm" style="color:var(--main);letter-spacing:1px"></div>
+            </div>
+            <div class="text-right">
+                <div class="text-xs mb-1" style="color:var(--sub)">Completate</div>
+                <div class="text-lg font-bold" style="color:var(--main)">
+                    <span id="filled-count">0</span><span style="color:var(--sub)"> / </span><span id="total-count">—</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress bar -->
+        <div class="prog-track mb-4">
+            <div id="game-prog" class="prog-fill" style="width:0%"></div>
+        </div>
+
+        <!-- Word slots -->
+        <div class="card mb-4" style="min-height:140px">
+            <div id="word-grid"></div>
+        </div>
+
+        <!-- Hint bar + submit -->
+        <div class="flex justify-between items-center">
+            <div class="text-xs" style="color:var(--sub)">
+                <i class="fa-solid fa-circle-info mr-1"></i>
+                <kbd style="background:rgba(255,255,255,0.07);padding:1px 5px;border-radius:3px">Tab</kbd> / <kbd style="background:rgba(255,255,255,0.07);padding:1px 5px;border-radius:3px">Enter</kbd> → următor &nbsp;·&nbsp;
+                <kbd style="background:rgba(255,255,255,0.07);padding:1px 5px;border-radius:3px">Shift+Tab</kbd> → înapoi
+            </div>
+            <button id="submit-btn" onclick="submitDictation()" class="btn btn-primary px-8 py-3 text-base">
+                <i class="fa-solid fa-paper-plane mr-2"></i> Trimite
+            </button>
+        </div>
+    </div>
+
+    <!-- RESULT -->
+    <div id="result-screen" class="screen w-full max-w-4xl text-center">
+        <h2 class="text-4xl font-bold mb-2">Rezultat</h2>
+        <div id="res-round-badge" class="font-bold text-sm mb-8" style="color:var(--main);letter-spacing:1px"></div>
+
+        <!-- Stat cards -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div class="stat-card accent">
+                <div class="text-xs uppercase font-bold mb-1" style="color:var(--sub)">Acuratețe</div>
+                <div class="text-5xl font-bold" style="color:var(--main)"><span id="res-accuracy">0</span>%</div>
+            </div>
+            <div class="stat-card">
+                <div class="text-xs uppercase font-bold mb-1" style="color:var(--sub)">Corecte</div>
+                <div class="text-4xl font-bold" style="color:var(--correct)">
+                    <span id="res-correct">0</span><span class="text-xl" style="color:var(--sub)">/</span><span id="res-total">0</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="text-xs uppercase font-bold mb-1" style="color:var(--sub)">Percentilă</div>
+                <div class="text-4xl font-bold text-blue-400"><span id="res-percentile">—</span>%</div>
+            </div>
+            <div class="stat-card">
+                <div class="text-xs uppercase font-bold mb-1" style="color:var(--sub)">Rang</div>
+                <div class="text-2xl font-bold" id="res-rank-display">—</div>
+            </div>
+        </div>
+
+        <!-- Word-by-word diff -->
+        <div class="card p-5 text-left mb-6" style="max-height:380px;overflow-y:auto">
+            <div class="text-xs uppercase font-bold mb-3" style="color:var(--sub)">Detalii</div>
+            <div id="diff-view" class="flex flex-wrap gap-1 leading-loose"></div>
+        </div>
+
+        <button onclick="switchScreen('waiting-screen')" class="btn px-8">Înapoi la Sală</button>
+    </div>
+
+</main>
+
+<!-- Footer -->
+<div class="fixed bottom-4 left-4 z-50 flex items-center gap-2 opacity-70 hover:opacity-100 transition-opacity">
+    <i class="fa-solid fa-network-wired text-xs text-gray-500"></i>
+    <span id="sync-indicator" class="text-xs text-gray-500 font-mono"></span>
+</div>
+<a href="https://github.com/Dany0443" target="_blank" rel="noopener noreferrer"
+   class="fixed bottom-4 right-4 z-50 flex items-center gap-2 opacity-50 hover:opacity-100 transition-opacity cursor-pointer text-gray-500 hover:text-[#e2b714]">
+    <span class="text-xs font-mono hidden sm:inline">Created by Dany0443</span>
+    <i class="fa-brands fa-github text-xl"></i>
+</a>
+
+<script src="../js/spell.js"></script>
+
+</body>
+</html>

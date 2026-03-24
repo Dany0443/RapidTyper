@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <title>FastTyper — Live Board</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <link rel="stylesheet" href="../css/presentation.css"></link>
+</head>
+<body>
+
+    <!-- CONNECTING -->
+    <div id="connecting-screen" class="screen active">
+        <div class="conn-logo">Fast<span style="color:var(--text)">Typer</span></div>
+        <div class="conn-sub">Se conectează la server</div>
+        <div class="conn-dots">
+            <div class="conn-dot"></div><div class="conn-dot"></div><div class="conn-dot"></div>
+        </div>
+    </div>
+
+    <!-- COUNTDOWN -->
+    <div id="countdown-screen" class="screen">
+        <div class="cd-num" id="cd-number">3</div>
+        <div class="cd-label" id="cd-label">Pregătește-te!</div>
+    </div>
+
+    <!-- LOBBY -->
+    <div id="lobby-screen" class="screen">
+        <div class="board-header">
+            <div class="header-logo">Fast<span>Typer</span></div>
+            <div class="header-badge">Sala de Așteptare</div>
+            <div id="lobby-round-badge" class="round-badge" style="display:none"></div>
+            <div class="header-right">
+                <div class="conn-status"></div>
+                <span style="font-size:0.72rem;color:var(--sub);letter-spacing:1px;">LIVE</span>
+            </div>
+        </div>
+        <div class="lobby-body">
+            <div class="lobby-sidebar">
+                <div>
+                    <div class="stat-num" id="lobby-count">0</div>
+                    <div class="stat-lbl">Jucători</div>
+                </div>
+                <div class="sidebar-div"></div>
+                <div class="waiting-text">Așteptăm<br>startul</div>
+                <div class="conn-dots">
+                    <div class="conn-dot"></div><div class="conn-dot"></div><div class="conn-dot"></div>
+                </div>
+            </div>
+            <div class="lobby-grades">
+                <div class="grade-col">
+                    <div class="grade-col-header">
+                        <div class="grade-col-title">Clasa 1–4</div>
+                        <div class="grade-count" id="cnt-1-4">0</div>
+                    </div>
+                    <div id="list-1-4" class="grade-players"></div>
+                </div>
+                <div class="grade-col">
+                    <div class="grade-col-header">
+                        <div class="grade-col-title">Clasa 5–9</div>
+                        <div class="grade-count" id="cnt-5-9">0</div>
+                    </div>
+                    <div id="list-5-9" class="grade-players"></div>
+                </div>
+                <div class="grade-col">
+                    <div class="grade-col-header">
+                        <div class="grade-col-title">Clasa 10–12</div>
+                        <div class="grade-count" id="cnt-10-12">0</div>
+                    </div>
+                    <div id="list-10-12" class="grade-players"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- RACING -->
+    <div id="racing-screen" class="screen">
+        <div class="board-header">
+            <div class="header-logo">Fast<span>Typer</span></div>
+            <div class="header-badge live">● LIVE RACE</div>
+            <div id="racing-round-badge" class="round-badge" style="display:none"></div>
+            <div class="header-right"><div class="conn-status"></div></div>
+        </div>
+        <div class="race-body">
+            <div class="race-tracks" id="race-tracks"></div>
+            <div class="race-sidebar">
+                <div>
+                    <div class="race-timer-label">Timp Rămas</div>
+                    <div class="race-timer-val" id="race-timer">20</div>
+                </div>
+                <div class="sidebar-div"></div>
+                <div class="race-mini-grid">
+                    <div class="mini-stat">
+                        <div class="mini-stat-num" id="stat-players">0</div>
+                        <div class="mini-stat-lbl">Jucători</div>
+                    </div>
+                    <div class="mini-stat">
+                        <div class="mini-stat-num" id="stat-finished">0</div>
+                        <div class="mini-stat-lbl">Gata</div>
+                    </div>
+                </div>
+                <div class="sidebar-div"></div>
+                <div class="sidebar-section-title">Lider curent</div>
+                <div class="leader-card" id="leader-card">
+                    <div class="leader-name" style="color:var(--sub)">—</div>
+                    <div class="leader-meta">niciun lider încă</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- RESULTS -->
+    <div id="results-screen" class="screen">
+        <div class="board-header">
+            <div class="header-logo">Fast<span>Typer</span></div>
+            <div class="header-badge">Rezultate Finale</div>
+            <div id="results-round-badge" class="round-badge" style="display:none"></div>
+            <div class="header-right"><div class="conn-status"></div></div>
+        </div>
+        <div class="results-body">
+            <div class="results-headline">
+                <div class="results-title">🏆 Clasament Final</div>
+                <div class="results-sub">Top performeri pe categorie de vârstă</div>
+            </div>
+            <div class="results-grid">
+                <div class="result-cat">
+                    <div class="result-cat-header">
+                        <div class="result-cat-title">Clasa 1–4</div>
+                        <div class="result-cat-count" id="rcount-1-4"></div>
+                    </div>
+                    <div class="podium-stage" id="podium-1-4"></div>
+                    <div class="result-rest" id="rest-1-4"></div>
+                </div>
+                <div class="result-cat">
+                    <div class="result-cat-header">
+                        <div class="result-cat-title">Clasa 5–9</div>
+                        <div class="result-cat-count" id="rcount-5-9"></div>
+                    </div>
+                    <div class="podium-stage" id="podium-5-9"></div>
+                    <div class="result-rest" id="rest-5-9"></div>
+                </div>
+                <div class="result-cat">
+                    <div class="result-cat-header">
+                        <div class="result-cat-title">Clasa 10–12</div>
+                        <div class="result-cat-count" id="rcount-10-12"></div>
+                    </div>
+                    <div class="podium-stage" id="podium-10-12"></div>
+                    <div class="result-rest" id="rest-10-12"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="../js/presentation.js"></script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+        :root { --bg: #323437; --main: #e2b714; --sub: #646669; --text: #d1d0c5; --error: #ca4754; --error-extra: #7e2a33; }
+        body { background: var(--bg); color: var(--text); font-family: 'Roboto Mono', monospace; overflow-x: hidden; }
+
+        .screen { display: none; opacity: 0; transition: opacity 0.3s ease; }
+        .screen.active { display: block; opacity: 1; }
+
+        .btn { background: transparent; color: var(--sub); border: 2px solid transparent; padding: 0.75rem 2rem; border-radius: 0.5rem; transition: 0.2s; cursor: pointer; font-weight: 700; }
+        .btn:hover { color: var(--text); border-color: var(--sub); }
+        .btn-primary { color: var(--main); border-color: var(--main); }
+        .btn-primary:hover { background: var(--main); color: var(--bg); }
+        .grade-btn.selected { border-color: var(--main); color: var(--main); background: rgba(226, 183, 20, 0.1); }
+        
+        .input-ui { background: transparent; border: none; border-bottom: 2px solid var(--sub); color: var(--text); padding: 0.5rem; outline: none; font-size: 1.5rem; text-align: center; width: 100%; }
+        .input-ui:focus { border-color: var(--main); }
+
+        #typing-wrapper { background: #2c2e31; border-radius: 12px; padding: 1.5rem; position: relative; cursor: text; }
+        #words-viewport { height: 120px; overflow: hidden; position: relative; mask-image: linear-gradient(to bottom, black 0%, black 80%, transparent 100%); }
+        #scroll-wrapper { position: relative; top: 0; left: 0; width: 100%; transition: transform 0.2s ease-out; }
+        #words-container { display: flex; flex-wrap: wrap; width: 100%; user-select: none; font-size: 1.7rem; line-height: 40px; }
+        
+        .word { margin-right: 0.6em; display: flex; border-bottom: 2px solid transparent; height: 40px; align-items: center; }
+        .word.error-underline { border-bottom-color: var(--error); }
+        .letter { position: relative; color: var(--sub); transition: color 0.1s; }
+        .letter.correct { color: var(--text); }
+        .letter.incorrect { color: var(--error); }
+        .letter.extra { color: var(--error-extra); opacity: 0.7; }
+
+        #caret { width: 2px; height: 1.8rem; background: var(--main); position: absolute; border-radius: 2px; transition: all 0.08s ease-out; z-index: 10; pointer-events: none; display: none; top: 0; left: 0; }
+        #caret.active { display: block; }
+        #caret.animate { animation: blink 1s infinite; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+        .blur-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.4); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; z-index: 20; opacity: 0; pointer-events: none; transition: 0.2s; border-radius: 12px; }
+        .blur-overlay.active { opacity: 1; pointer-events: auto; }
+        
+        .progress-bar-container { width: 100%; height: 4px; background: var(--sub); border-radius: 2px; overflow: hidden; }
+        .progress-bar-fill { height: 100%; background: var(--main); transition: width 0.3s ease-out; border-radius: 2px; }
+        
+        @keyframes shake { 
+        0%, 100% { transform: translateX(0); } 
+        10%, 30%, 50%, 70%, 90% { transform: translateX(-10px); } 
+        20%, 40%, 60%, 80% { transform: translateX(10px); } 
+        }
+        .animate-shake { animation: shake 0.6s; }
+
+
+        .status-indicator { width: 10px; height: 10px; border-radius: 50%; }
+        .status-green { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+        .status-yellow { background: #eab308; box-shadow: 0 0 10px #eab308; }
+        .status-red { background: #ef4444; box-shadow: 0 0 10px #ef4444; }
