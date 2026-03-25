@@ -142,10 +142,8 @@ vite.config.ts.timestamp-*
 
 
 # some other stuff.
-
-LICENSE
 README.md
-/data
-/db 
+data/
+db/
 LICENSE
 package-lock.json

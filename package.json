@@ -4,7 +4,7 @@
   "description": "Professional Typing Event Server",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node Server/server.js"
   },
   "dependencies": {
     "sqlite3": "^5.0.2",
