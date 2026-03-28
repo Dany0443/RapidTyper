@@ -92,8 +92,20 @@
                             <div class="text-xs font-bold uppercase" style="color:var(--sub)">Competition Text</div>
                             <button onclick="updateText()" class="btn text-xs py-1 px-3"><i class="fa-solid fa-save mr-1"></i>Save</button>
                         </div>
-                        <textarea id="game-text" class="host-textarea" rows="5" placeholder="Enter the text players will type..." oninput="_updateCount('game-text','game-text-count')"></textarea>
-                        <div id="game-text-count" class="text-xs mt-1 text-right" style="color:var(--sub)">0 cuvinte · 0 caractere</div>
+                        <!-- Per-round text toggle -->
+                        <div class="flex items-center gap-3 mb-2">
+                            <label class="flex items-center gap-2 cursor-pointer select-none text-xs font-bold uppercase" style="color:var(--sub)">
+                                <div id="per-round-toggle" onclick="togglePerRoundText()" class="per-round-switch"></div>
+                                <span id="per-round-label">Text pe Rundă</span>
+                            </label>
+                        </div>
+                        <!-- Single text (default) -->
+                        <div id="single-text-area">
+                            <textarea id="game-text" class="host-textarea" rows="5" placeholder="Enter the text players will type..." oninput="_updateCount('game-text','game-text-count')"></textarea>
+                            <div id="game-text-count" class="text-xs mt-1 text-right" style="color:var(--sub)">0 cuvinte · 0 caractere</div>
+                        </div>
+                        <!-- Per-round texts (shown when toggle is on and rounds > 1) -->
+                        <div id="per-round-text-areas" style="display:none"></div>
                     </div>
                 </div>
                 <div class="card px-4 py-3 flex justify-between items-center gap-3 mb-4">
@@ -313,6 +325,21 @@
 
     </main>
 
+    <style>
+        /* Per-round text toggle switch */
+        .per-round-switch {
+            width: 34px; height: 18px; border-radius: 9px;
+            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+            cursor: pointer; transition: background 0.2s; position: relative; flex-shrink: 0;
+        }
+        .per-round-switch::after {
+            content: ''; position: absolute; top: 2px; left: 2px;
+            width: 12px; height: 12px; border-radius: 50%;
+            background: var(--sub); transition: transform 0.2s, background 0.2s;
+        }
+        .per-round-switch.on { background: rgba(226,183,20,0.3); border-color: var(--main); }
+        .per-round-switch.on::after { transform: translateX(16px); background: var(--main); }
+    </style>
     <script src="../js/host.js"></script>
     <script src="../js/host-cameras.js"></script>
 </body>

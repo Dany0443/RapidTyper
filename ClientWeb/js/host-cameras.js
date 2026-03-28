@@ -64,14 +64,16 @@ function handleCameraMessage(data) {
             break;
         }
 
-        // JPEG thumbnail arrives — update grid
+        // Thumbnail arrives — update grid.
+        // data.jpeg can be:
+        //   raw base64 JPEG string  → prepend  data:image/jpeg;base64,
+        //   full data URI           → use as-is (dev virtual cams send data:image/svg+xml;...)
         case 'CAM_THUMBNAIL': {
             const safeKey = (data.camKey || '').replace(/[^a-z0-9]/gi, '_');
             const img     = document.getElementById('thumb-' + safeKey);
             if (img && data.jpeg) {
-                img.src = 'data:image/jpeg;base64,' + data.jpeg;
+                img.src = data.jpeg.startsWith('data:') ? data.jpeg : 'data:image/jpeg;base64,' + data.jpeg;
                 img.style.display = 'block';
-                // hide placeholder
                 const ph = document.getElementById('ph-' + safeKey);
                 if (ph) ph.style.display = 'none';
             }

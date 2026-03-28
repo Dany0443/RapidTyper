@@ -1,4 +1,4 @@
-    const WS_URL       = `ws://${location.hostname || 'localhost'}:5889`;
+const WS_URL       = `ws://${location.hostname || 'localhost'}:5889`;
     const LS_SESSION   = 'mt_session';
     const LS_DRAFT     = 'mt_spell_draft_v2'; // new key — v2 stores JSON array
 
@@ -142,6 +142,21 @@
                 switchScreen('waiting-screen');
                 document.getElementById('change-name-btn').style.display = 'block';
                 break;
+
+            case 'USERNAME_CHANGED': {
+                // Server renamed us because our chosen name was already taken.
+                const assigned = data.assigned;
+                if (!assigned) break;
+                const _sess = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
+                if (_sess) { _sess.username = assigned; localStorage.setItem(LS_SESSION, JSON.stringify(_sess)); }
+                document.getElementById('display-name').textContent = assigned;
+                const _t = document.createElement('div');
+                _t.style.cssText = 'position:fixed;bottom:5rem;left:50%;transform:translateX(-50%);background:#2c2e31;border:1px solid var(--main);color:var(--text);padding:0.6rem 1.25rem;border-radius:8px;z-index:9999;font-family:Roboto Mono,monospace;font-size:0.8rem;text-align:center;white-space:nowrap;';
+                _t.textContent = `Nume ocupat — ai primit: ${assigned}`;
+                document.body.appendChild(_t);
+                setTimeout(() => _t.remove(), 4500);
+                break;
+            }
 
             case 'KICKED':
                 localStorage.removeItem(LS_SESSION);

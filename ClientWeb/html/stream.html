@@ -9,171 +9,205 @@
     <title>Stream</title>
     <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="../css/stream.css"></link>
+    <link rel="stylesheet" href="../css/stream.css">
+    <style>
+        /* ── Phone-first overrides ── */
+        body { background: var(--bg); }
+
+        /* Connecting */
+        #connecting-screen { flex-direction: column; gap: 1.2rem; padding-top: env(safe-area-inset-top); }
+
+        /* Auth screen — centered card */
+        #auth-screen { padding: 1.5rem; padding-top: calc(env(safe-area-inset-top) + 1.5rem); }
+        .auth-card { width: 100%; max-width: 400px; margin: 0 auto; }
+        .auth-icon { width: 64px; height: 64px; border-radius: 50%; background: rgba(226,183,20,0.1); display: flex; align-items: center; justify-content: center; margin: 0 auto 1.25rem; }
+
+        /* Stream screen */
+        #stream-screen { padding: 0; padding-bottom: env(safe-area-inset-bottom); }
+        .stream-inner { display: flex; flex-direction: column; height: 100%; gap: 0; }
+
+        /* Video fills most of the screen */
+        .video-block { position: relative; width: 100%; background: #000; flex-shrink: 0; }
+        #preview-video { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; border-radius: 0; border: none; }
+
+        /* Video overlays */
+        .video-overlays { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; }
+        .vid-live-badge { position: absolute; top: 0.75rem; left: 0.75rem; display: none; align-items: center; gap: 5px; background: rgba(202,71,84,0.92); color: #fff; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.1em; padding: 4px 10px; border-radius: 4px; pointer-events: none; }
+        .vid-live-badge.active { display: flex; }
+        .vid-live-dot { width: 5px; height: 5px; border-radius: 50%; background: #fff; animation: blink 1.2s ease-in-out infinite; }
+        .vid-cam-id { position: absolute; top: 0.75rem; right: 0.75rem; font-size: 0.62rem; background: rgba(0,0,0,0.55); color: var(--main); padding: 3px 8px; border-radius: 4px; font-weight: 700; }
+        .vid-quality-badge { position: absolute; bottom: 0.75rem; right: 0.75rem; font-size: 0.6rem; background: rgba(0,0,0,0.55); color: var(--sub); padding: 2px 6px; border-radius: 3px; }
+
+        /* Controls panel below video */
+        .controls-panel { flex: 1; overflow-y: auto; padding: 1rem 1rem; display: flex; flex-direction: column; gap: 0.85rem; }
+
+        /* Big action button — thumb-friendly, full width */
+        .big-action-btn { width: 100%; min-height: 56px; border-radius: 12px; font-size: 1rem; font-weight: 700; letter-spacing: 0.05em; display: flex; align-items: center; justify-content: center; gap: 0.6rem; border: 2px solid; cursor: pointer; transition: all 0.15s; touch-action: manipulation; font-family: 'Roboto Mono', monospace; }
+        .big-start { color: var(--main); border-color: var(--main); background: transparent; }
+        .big-start:hover, .big-start:active { background: var(--main); color: var(--bg); }
+        .big-stop { color: #fff; border-color: var(--error); background: var(--error); }
+        .big-stop:active { opacity: 0.8; }
+
+        /* Secondary row: flip + quality */
+        .secondary-row { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 0.5rem; }
+        .q-pill { min-height: 44px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1.5px solid transparent; color: var(--sub); font: 700 0.75rem 'Roboto Mono', monospace; cursor: pointer; display: flex; align-items: center; justify-content: center; touch-action: manipulation; transition: all 0.15s; }
+        .q-pill.active { border-color: var(--main); color: var(--main); background: rgba(226,183,20,0.07); }
+        .q-pill:active { opacity: 0.7; }
+
+        /* Status log */
+        .log-row { display: flex; align-items: center; gap: 0.5rem; }
+        .log-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--sub); flex-shrink: 0; }
+        .log-dot.live { background: var(--error); box-shadow: 0 0 6px var(--error); animation: blink 1.2s ease-in-out infinite; }
+        .log-text { font-size: 0.68rem; color: var(--sub); }
+
+        /* Divider */
+        .slim-div { height: 1px; background: rgba(255,255,255,0.05); }
+
+        /* Logout link */
+        .logout-link { font-size: 0.62rem; color: var(--sub); background: none; border: none; font-family: 'Roboto Mono', monospace; cursor: pointer; display: flex; align-items: center; gap: 0.4rem; touch-action: manipulation; padding: 0.25rem 0; opacity: 0.6; }
+        .logout-link:active { opacity: 1; }
+
+        @media (min-width: 540px) {
+            #stream-screen { display: flex; align-items: flex-start; justify-content: center; padding: 1.5rem; }
+            .stream-inner { max-width: 440px; width: 100%; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,0.06); background: var(--panel); }
+            #preview-video { border-radius: 0; }
+        }
+    </style>
 </head>
 
-<body class="min-h-screen flex flex-col safe-top">
+<body class="safe-top">
 
-    <!-- ══════════════════════════════════
-         HEADER — matches index.html exactly
-         but icon = video camera, title = streamer
-    ══════════════════════════════════ -->
-    <header class="w-full px-5 py-4 flex justify-between items-center"
-            style="border-bottom: 1px solid rgba(255,255,255,0.05)">
-
-        <!-- left: logo -->
-        <div class="flex items-center gap-3">
-            <i class="fa-solid fa-video text-2xl" style="color: var(--main)"></i>
-            <h1 class="text-xl font-bold">stream</h1>
+    <!-- ── HEADER ── -->
+    <header style="padding: calc(env(safe-area-inset-top) + 0.75rem) 1.25rem 0.75rem; display:flex; justify-content:space-between; align-items:center; border-bottom: 1px solid rgba(255,255,255,0.05)">
+        <div style="display:flex;align-items:center;gap:0.6rem">
+            <i class="fa-solid fa-video" style="color:var(--main);font-size:1.1rem"></i>
+            <span style="font-weight:700;font-size:1rem">stream</span>
         </div>
-
-        <!-- right: connection status -->
-        <div class="flex items-center gap-2 text-sm" style="color: var(--sub)">
+        <div style="display:flex;align-items:center;gap:0.6rem;font-size:0.72rem;color:var(--sub)">
             <div id="status-dot" class="status-indicator status-red"></div>
-            <span id="status-text" style="font-size: 0.75rem">disconnected</span>
+            <span id="status-text">disconnected</span>
         </div>
     </header>
 
-    <!-- ══════════════════════════════════
-         SCREEN: CONNECTING TO SERVER
-         Shown immediately on load while WS opens
-    ══════════════════════════════════ -->
+    <!-- ── CONNECTING ── -->
     <div id="connecting-screen" class="screen active flex-1 items-center justify-center text-center p-8">
         <div>
-            <div class="inline-block p-4 rounded-full mb-5"
-                 style="background: rgba(226,183,20,0.1)">
-                <i class="fa-solid fa-circle-notch text-4xl spin" style="color: var(--main)"></i>
+            <div style="width:60px;height:60px;border-radius:50%;background:rgba(226,183,20,0.1);display:flex;align-items:center;justify-content:center;margin:0 auto 1rem">
+                <i class="fa-solid fa-circle-notch spin" style="color:var(--main);font-size:1.5rem"></i>
             </div>
-            <h2 class="text-xl font-bold mb-2">Se conectează...</h2>
-            <p class="text-sm" style="color: var(--sub)">Se stabilește conexiunea cu serverul</p>
+            <p style="font-weight:700;margin-bottom:0.35rem">Se conectează...</p>
+            <p style="font-size:0.75rem;color:var(--sub)">Se stabilește conexiunea</p>
         </div>
     </div>
 
-    <!-- ══════════════════════════════════
-         SCREEN: AUTH
-         Only shown after WS is open.
-         Camera / stream panel NOT accessible until
-         server responds with STREAM_AUTH_OK.
-    ══════════════════════════════════ -->
-    <div id="auth-screen" class="screen flex-1 items-center justify-center p-6">
-        <div class="w-full" style="max-width: 380px">
-
-            <!-- icon + heading -->
-            <div class="text-center mb-8">
-                <div class="inline-block p-4 rounded-full mb-4"
-                     style="background: rgba(226,183,20,0.1)">
-                    <i class="fa-solid fa-lock text-3xl" style="color: var(--main)"></i>
+    <!-- ── AUTH ── -->
+    <div id="auth-screen" class="screen flex-1 flex items-center justify-center">
+        <div class="auth-card">
+            <div class="text-center" style="margin-bottom:2rem">
+                <div class="auth-icon">
+                    <i class="fa-solid fa-lock" style="color:var(--main);font-size:1.4rem"></i>
                 </div>
-                <h2 class="text-2xl font-bold mb-1">Acces Cameră</h2>
-                <p class="text-sm" style="color: var(--sub)">Introdu cheia de acces pentru stream</p>
+                <h2 style="font-size:1.3rem;font-weight:700;margin-bottom:0.3rem">Acces Cameră</h2>
+                <p style="font-size:0.75rem;color:var(--sub)">Introdu cheia de acces pentru stream</p>
             </div>
 
-            <!-- key input -->
-            <div class="mb-5">
+            <div style="margin-bottom:1rem">
                 <label class="field-label" for="stream-key">cheie de acces</label>
-                <div class="relative">
-                    <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                        <i class="fa-solid fa-key" style="color: var(--sub)"></i>
+                <div style="position:relative">
+                    <div style="position:absolute; left:0; top:0; bottom:0; padding-left:1rem; display:flex; align-items:center; pointer-events:none;">
+                        <i class="fa-solid fa-key" style="color:var(--sub)"></i>
                     </div>
-                    <input
-                        type="password"
-                        id="stream-key"
-                        class="field-input"
-                        style="padding-left: 3rem; text-align: left; letter-spacing: 0.15em"
-                        placeholder="••••••••"
-                        autocomplete="current-password"
+                </div>
+
+                    <input type="password" id="stream-key" class="field-input"
+                        style="padding-left:3rem;text-align:left;letter-spacing:0.12em"
+                        placeholder="••••••••" autocomplete="current-password"
                         onkeydown="if(event.key==='Enter') submitAuth()">
                 </div>
-                <p id="auth-error" class="text-xs mt-2" style="color:var(--error);display:none;letter-spacing:0.05em">
+                <p id="auth-error" style="font-size:0.72rem;color:var(--error);margin-top:0.4rem;display:none">
                     Cheie incorectă. Încearcă din nou.
                 </p>
             </div>
 
-            <button class="btn btn-primary btn-w" onclick="submitAuth()" id="auth-btn">
-                <i class="fa-solid fa-arrow-right-to-bracket"></i>
-                Conectare
+            <button class="btn btn-primary" style="width:100%;min-height:52px;font-size:0.9rem" onclick="submitAuth()" id="auth-btn">
+                <i class="fa-solid fa-arrow-right-to-bracket"></i> Conectare
             </button>
 
-            <!-- waiting for server response indicator (hidden until key is sent) -->
-            <div id="auth-waiting" class="text-center mt-4" style="display:none">
+            <div id="auth-waiting" style="text-align:center;margin-top:1rem;display:none">
                 <i class="fa-solid fa-circle-notch spin" style="color:var(--sub);font-size:0.9rem"></i>
-                <span class="text-xs ml-2" style="color:var(--sub)">verificare cheie...</span>
+                <span style="font-size:0.72rem;color:var(--sub);margin-left:0.4rem">verificare cheie...</span>
             </div>
         </div>
     </div>
 
-    <!-- ══════════════════════════════════
-         SCREEN: STREAM
-         Only unlocked after STREAM_AUTH_OK from server.
-         Camera access requested HERE, not before.
-    ══════════════════════════════════ -->
-    <div id="stream-screen" class="screen flex-1 flex-col safe-bottom">
+    <!-- ── STREAM ── -->
+    <div id="stream-screen" class="screen flex-1">
+        <div class="stream-inner">
 
-        <div class="flex-1 flex flex-col gap-4 px-4 py-4 overflow-y-auto">
-        <div class="stream-card" style="width:100%">
-
-            <!-- video preview -->
-            <video
-                id="preview-video"
-                autoplay muted playsinline
-                webkit-playsinline
-                x5-video-player-type="h5"
-                x5-video-player-fullscreen="false"
-                x5-video-orientation="portraint">
-            </video>
-
-            <!-- cam id + live badge row -->
-            <div class="flex items-center justify-between">
-                <span class="text-xs" style="color:var(--sub)">
-                    cam&nbsp;<strong id="cam-id-display" style="color:var(--main)">—</strong>
-                </span>
-                <div class="live-badge" id="live-badge">
-                    <div class="live-dot"></div> live
+            <!-- Video preview with overlays -->
+            <div class="video-block">
+                <video id="preview-video" autoplay muted playsinline webkit-playsinline></video>
+                <div class="video-overlays">
+                    <div class="vid-live-badge" id="live-badge">
+                        <div class="vid-live-dot"></div> LIVE
+                    </div>
+                    <div class="vid-cam-id" id="cam-id-display">cam —</div>
+                    <div class="vid-quality-badge" id="quality-badge">720p</div>
                 </div>
             </div>
 
-            <div class="divider"></div>
+            <!-- Controls -->
+            <div class="controls-panel">
 
-            <!-- quality selector -->
-            <div>
-                <label class="field-label">calitate video</label>
-                <div class="q-grid">
-                    <button class="q-btn active" onclick="setQuality('hd',this)" id="q-hd">720p</button>
-                    <button class="q-btn"        onclick="setQuality('fhd',this)">1080p</button>
-                    <button class="q-btn"        onclick="setQuality('4k',this)">4K</button>
+                <!-- Big start/stop button -->
+                <button class="big-action-btn big-start" id="start-btn" onclick="startStream()">
+                    <i class="fa-solid fa-circle"></i> Start Live
+                </button>
+                <button class="big-action-btn big-stop" id="stop-btn" onclick="stopStream()" style="display:none">
+                    <i class="fa-solid fa-square"></i> Oprește Stream
+                </button>
+
+                <div class="slim-div"></div>
+
+                <!-- Secondary controls: flip + quality pills -->
+                <div class="secondary-row">
+                    <button class="q-pill" onclick="flipCamera()" title="flip camera">
+                        <i class="fa-solid fa-rotate"></i>
+                    </button>
+                    <button class="q-pill active" id="q-hd"  onclick="setQuality('hd',this)">720p</button>
+                    <button class="q-pill"         id="q-fhd" onclick="setQuality('fhd',this)">1080p</button>
+                    <button class="q-pill"         id="q-4k"  onclick="setQuality('4k',this)">4K</button>
                 </div>
-            </div>
 
-            <!-- camera controls -->
-            <div class="ctrl-grid">
-                <button class="btn" id="flip-btn" onclick="flipCamera()">
-                    <i class="fa-solid fa-rotate"></i> flip
+                <!-- Status log -->
+                <div class="log-row">
+                    <div class="log-dot" id="log-dot"></div>
+                    <span class="log-text" id="status-log">pregătit · cameră inițializată</span>
+                </div>
+
+                <div class="slim-div"></div>
+
+                <!-- Logout -->
+                <button class="logout-link" onclick="logoutStream()">
+                    <i class="fa-solid fa-arrow-right-from-bracket"></i>
+                    schimbă camera / logout
                 </button>
-                <button class="btn btn-primary" id="start-btn" onclick="startStream()">
-                    <i class="fa-solid fa-circle"></i> start live
-                </button>
+
             </div>
-
-            <!-- STOP button — always full width, very visible when live -->
-            <button class="btn btn-danger" id="stop-btn"
-                    onclick="stopStream()" style="display:none; width:100%; font-size:1rem; min-height:52px;">
-                <i class="fa-solid fa-square"></i> oprește stream
-            </button>
-
-            <!-- status log -->
-            <div class="status-log" id="status-log">pregătit · cameră inițializată</div>
-
-            <div class="divider"></div>
-
-        </div><!-- /stream-card -->
-        </div><!-- /overflow wrapper -->
+        </div>
     </div>
 
-    <!-- toast for errors -->
     <div class="toast" id="toast"></div>
 
-    <script src="../js/stream.js"></script>
-
+    <!-- school-server.js redirects http://.../stream → https://...:8443/stream
+         This inline script is a fallback for edge cases only. -->
+    <script>
+    (function(){
+        if(location.protocol==='http:' && location.hostname!=='localhost' && location.hostname!=='127.0.0.1'){
+            location.replace('https://'+location.hostname+':8443'+location.pathname+location.search);
+        }
+    })();
+    </script>
+        <script src="../js/stream.js"></script>
 </body>
 </html>

@@ -13,6 +13,62 @@ const WS_URL = `ws://${location.hostname || "localhost"}:5889`;
         let maxRounds    = 3;
         let phase = 'LOBBY';
         let spellRoundActive = false;
+        let perRoundTextEnabled = false;
+        let perRoundTexts = [];  // Array indexed 0..maxRounds-1
+
+        // ── Per-round text ────────────────────────────────────────────
+        function togglePerRoundText() {
+            perRoundTextEnabled = !perRoundTextEnabled;
+            const toggle = document.getElementById('per-round-toggle');
+            if (toggle) toggle.classList.toggle('on', perRoundTextEnabled);
+            renderPerRoundAreas();
+        }
+
+        function renderPerRoundAreas() {
+            const single = document.getElementById('single-text-area');
+            const multi  = document.getElementById('per-round-text-areas');
+            if (!single || !multi) return;
+
+            // If only 1 round or toggle off — always show single
+            if (!perRoundTextEnabled || maxRounds <= 1) {
+                single.style.display = 'block';
+                multi.style.display  = 'none';
+                return;
+            }
+
+            single.style.display = 'none';
+            multi.style.display  = 'block';
+
+            // Build one textarea per round
+            multi.innerHTML = Array.from({ length: maxRounds }, (_, i) => `
+                <div class="mb-3">
+                    <div class="text-xs font-bold uppercase mb-1" style="color:var(--sub)">
+                        Runda ${i + 1}
+                        <button onclick="saveRoundText(${i})" class="ml-2 btn text-xs py-0.5 px-2" style="font-size:0.6rem">
+                            <i class="fa-solid fa-save mr-1"></i>Save R${i+1}
+                        </button>
+                    </div>
+                    <textarea id="game-text-r${i}" class="host-textarea" rows="3"
+                        placeholder="Text for round ${i+1}..."
+                        oninput="_updateCount('game-text-r${i}','count-r${i}')"
+                    >${perRoundTexts[i] || ''}</textarea>
+                    <div id="count-r${i}" class="text-xs mt-0.5 text-right" style="color:var(--sub)">0 cuvinte</div>
+                </div>
+            `).join('');
+
+            // Recount each
+            for (let i = 0; i < maxRounds; i++) _updateCount(`game-text-r${i}`, `count-r${i}`);
+        }
+
+        function saveRoundText(idx) {
+            const ta = document.getElementById(`game-text-r${idx}`);
+            if (!ta || !ta.value.trim()) return;
+            perRoundTexts[idx] = ta.value.trim();
+            if (ws && ws.readyState === WebSocket.OPEN)
+                ws.send(JSON.stringify({ type: 'UPDATE_TEXT', text: ta.value.trim(), roundIndex: idx }));
+            ta.style.borderColor = '#22c55e';
+            setTimeout(() => ta.style.borderColor = '', 1500);
+        }
 
         // ── Word/char counter for text areas ──────────────────────────
         function _updateCount(taId, countId) {
@@ -40,6 +96,7 @@ const WS_URL = `ws://${location.hostname || "localhost"}:5889`;
             if (ws && ws.readyState === WebSocket.OPEN)
                 ws.send(JSON.stringify({ type: 'SET_ROUNDS', rounds: n }));
             updateRoundUI();
+            renderPerRoundAreas();
         }
 
         // ── Grade filters ─────────────────────────────────────────────
@@ -63,7 +120,8 @@ const WS_URL = `ws://${location.hostname || "localhost"}:5889`;
                 document.getElementById('view-' + s).style.display = s === viewName ? 'block' : 'none';
                 document.getElementById('tab-' + s).classList.toggle('active', s === viewName);
             });
-            if (ws && ws.readyState === WebSocket.OPEN)
+            // Only broadcast mode changes for actual game-mode tabs, never for 'cameras'
+            if (ws && ws.readyState === WebSocket.OPEN && (viewName === 'fast-typer' || viewName === 'spelling-bee'))
                 ws.send(JSON.stringify({ type: 'SET_GAME_MODE', mode: viewName === 'fast-typer' ? 'race' : 'spell' }));
         }
 
@@ -504,6 +562,11 @@ const WS_URL = `ws://${location.hostname || "localhost"}:5889`;
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
             const btn = document.getElementById('next-round-btn');
             arm(btn, `<i class="fa-solid fa-forward-step"></i> CONFIRM Round ${currentRound+1}`, () => {
+                if (perRoundTextEnabled && maxRounds > 1) {
+                    const nextRoundIdx = currentRound; // still on currentRound, about to go to currentRound+1
+                    const roundText = perRoundTexts[nextRoundIdx];
+                    if (roundText) ws.send(JSON.stringify({ type: 'UPDATE_TEXT', text: roundText }));
+                }
                 ws.send(JSON.stringify({ type: 'NEXT_ROUND' }));
             });
         }
@@ -519,8 +582,14 @@ const WS_URL = `ws://${location.hostname || "localhost"}:5889`;
         function startGame() {
             const btn = document.getElementById('start-btn');
             arm(btn, `<i class="fa-solid fa-play"></i> CONFIRM (${allPlayers.length}p)`, () => {
-                if (ws && ws.readyState === WebSocket.OPEN)
-                    ws.send(JSON.stringify({ type: 'START_REQUEST' }));
+                if (ws && ws.readyState !== WebSocket.OPEN) return;
+                // If per-round text mode: send text for the upcoming round first
+                if (perRoundTextEnabled && maxRounds > 1) {
+                    const nextRoundIdx = currentRound; // 0-based index for next round
+                    const roundText = perRoundTexts[nextRoundIdx];
+                    if (roundText) ws.send(JSON.stringify({ type: 'UPDATE_TEXT', text: roundText }));
+                }
+                ws.send(JSON.stringify({ type: 'START_REQUEST' }));
             });
         }
 

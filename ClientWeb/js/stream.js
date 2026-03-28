@@ -1,464 +1,628 @@
+'use strict';
 
-    // ════════════════════════════════════════════════════════════
-    //  CONFIG
-    // ════════════════════════════════════════════════════════════
-    const WS_URL = location.hostname === 'localhost' || location.hostname === '127.0.0.1'
-    ? `ws://${location.hostname}:5889` 
-    : `wss://typer.webjuniors.org/ws`;
+// ════════════════════════════════════════════════════════════
+//  CONFIG — WS URL auto-detection
+// ════════════════════════════════════════════════════════════
+const WS_URL = window.__WS_URL__ || (() => {
+    const proto  = location.protocol === 'https:' ? 'wss' : 'ws';
+    const host   = location.hostname || 'localhost';
+    const wsPort = (location.port === '5890' || location.port === '8080') ? ':5889'
+                 : location.port ? ':' + location.port : '';
+    return `${proto}://${host}${wsPort}`;
+})();
 
-    // ════════════════════════════════════════════════════════════
-    //  STATE
-    // ════════════════════════════════════════════════════════════
-    let ws            = null;
-    let authed        = false;   // true only after STREAM_AUTH_OK
-    let localStream   = null;
-    let peerConns     = {};      // viewerId -> RTCPeerConnection
-    let streaming     = false;
-    let facingMode    = 'environment';
-    let camId         = 'cam-' + Math.random().toString(36).substr(2, 5).toUpperCase();
-    let quality       = { width: 1280, height: 720 };
-    let reconnectAttempts = 0;
-    let pingInterval  = null;
+// Video port for binary MediaRecorder chunks (school server only)
+const VIDEO_WS_URL = (() => {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${location.hostname || 'localhost'}:5890`;
+})();
 
-    const qualityMap = {
-        hd:  { width: 1280, height: 720  },
-        fhd: { width: 1920, height: 1080 },
-        '4k':{ width: 3840, height: 2160 }
+// ════════════════════════════════════════════════════════════
+//  SESSION PERSISTENCE
+//  Saves stream key + stable camId so the phone skips re-auth
+//  after a page reload or brief disconnect.
+// ════════════════════════════════════════════════════════════
+const LS_KEY = 'rt_stream_session';
+
+function loadSession() {
+    try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch { return null; }
+}
+function saveSession(key, id) {
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ key, camId: id })); } catch {}
+}
+function clearSession() {
+    try { localStorage.removeItem(LS_KEY); } catch {}
+}
+
+// ════════════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════════════
+const _session   = loadSession();
+
+let ws               = null;
+let authed           = false;
+let localStream      = null;
+let peerConns        = {};
+let streaming        = false;
+let facingMode       = 'environment';
+let camId            = _session?.camId || ('cam-' + Math.random().toString(36).substr(2, 5).toUpperCase());
+let savedKey         = _session?.key   || '';
+let quality          = null;   // set by autodetectQuality() on first camera init
+let qualityKey       = 'hd';   // tracks which button is active
+let reconnectAttempts = 0;
+let pingInterval     = null;
+
+// Recording
+let videoWs      = null;
+let mediaRec     = null;
+let recording    = false;
+
+const qualityMap = {
+    hd:  { width: 1280, height: 720  },
+    fhd: { width: 1920, height: 1080 },
+    '4k':{ width: 3840, height: 2160 },
+};
+
+// ════════════════════════════════════════════════════════════
+//  DOM HELPERS — all getElementById calls go through these
+//  so a missing element never throws
+// ════════════════════════════════════════════════════════════
+const el = id => document.getElementById(id);
+
+function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    const t = el(id);
+    if (t) t.classList.add('active');
+}
+
+let _toastTimer = null;
+function showToast(msg) {
+    const t = el('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add('show');
+    if (_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+function setStatus(state, text) {
+    const dot = el('status-dot');
+    if (dot) dot.className = 'status-indicator status-' + state;
+    const txt = el('status-text');
+    if (txt) txt.textContent = text;
+}
+
+function log(msg) {
+    const e = el('status-log');
+    if (e) e.textContent = msg;
+    const dot = el('log-dot');
+    if (dot) dot.classList.toggle('live', streaming);
+}
+
+function updateQualityBadge() {
+    const labels = { hd: '720p', fhd: '1080p', '4k': '4K' };
+    const badge = el('quality-badge');
+    if (badge) badge.textContent = labels[qualityKey] || quality ? `${quality?.width || ''}p` : '—';
+}
+
+// ════════════════════════════════════════════════════════════
+//  WEBSOCKET
+// ════════════════════════════════════════════════════════════
+function connectWS() {
+    setStatus('yellow', 'connecting...');
+    try { ws = new WebSocket(WS_URL); }
+    catch (e) {
+        setStatus('red', 'connection failed');
+        scheduleReconnect();
+        return;
+    }
+
+    ws.onopen = () => {
+        reconnectAttempts = 0;
+        startPing();
+        if (savedKey) {
+            // Silent re-auth with saved session
+            setStatus('yellow', 'reconnecting...');
+            ws.send(JSON.stringify({ type: 'STREAM_AUTH', key: savedKey, camId, role: 'streamer' }));
+        } else {
+            setStatus('yellow', 'connected · needs auth');
+            showScreen('auth-screen');
+        }
     };
 
-    // ════════════════════════════════════════════════════════════
-    //  SCREEN MANAGEMENT
-    // ════════════════════════════════════════════════════════════
-    function showScreen(id) {
-        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-        document.getElementById(id).classList.add('active');
-    }
+    ws.onmessage = e => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        handleMsg(msg);
+    };
 
-    // ════════════════════════════════════════════════════════════
-    //  TOAST
-    // ════════════════════════════════════════════════════════════
-    let toastTimer = null;
-    function showToast(msg) {
-        const t = document.getElementById('toast');
-        t.textContent = msg;
-        t.classList.add('show');
-        if (toastTimer) clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  STATUS DOT
-    // ════════════════════════════════════════════════════════════
-    function setStatus(state, text) {
-        // state: 'green' | 'yellow' | 'red'
-        const dot = document.getElementById('status-dot');
-        dot.className = 'status-indicator status-' + state;
-        document.getElementById('status-text').textContent = text;
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  WEBSOCKET — connects on page load, NOT gated by auth
-    //  but NO stream data flows until authed = true
-    // ════════════════════════════════════════════════════════════
-    function connectWS() {
-        setStatus('yellow', 'connecting...');
-        ws = new WebSocket(WS_URL);
-
-        ws.onopen = () => {
-            reconnectAttempts = 0;
-            setStatus('yellow', 'connected · needs auth');
-            // WS is open — now show the auth form
-            showScreen('auth-screen');
-            startPing();
-        };
-
-        ws.onmessage = (e) => {
-            let msg;
-            try { msg = JSON.parse(e.data); } catch { return; }
-            handleServerMessage(msg);
-        };
-
-        ws.onclose = () => {
-            setStatus('red', 'disconnected');
-            authed = false;
-            stopPing();
-            // If mid-stream, stop cleanly
-            if (streaming) forceStopStream();
-            // Show connecting screen, retry
-            showScreen('connecting-screen');
-            const delay = Math.min(1500 * Math.pow(1.5, reconnectAttempts), 20000);
-            reconnectAttempts++;
-            setTimeout(connectWS, delay);
-        };
-
-        ws.onerror = () => setStatus('red', 'error');
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  SERVER MESSAGE HANDLER
-    //  SECURITY: all stream-related messages are ignored until
-    //  authed === true. The server also enforces this on its side.
-    // ════════════════════════════════════════════════════════════
-    async function handleServerMessage(msg) {
-        switch (msg.type) {
-
-            // ── AUTH RESPONSE ────────────────────────────────────
-            case 'STREAM_AUTH_OK':
-                authed = true;
-                setStatus('green', 'autentificat');
-                hideAuthWaiting();
-                // ONLY NOW request camera and show stream UI
-                await initCamera();
-                showScreen('stream-screen');
-                document.getElementById('cam-id-display').textContent = camId;
-                // Start keeping screen on from this point forward
-                await acquireWakeLock();
-                log('cameră pornită · pregătit de stream');
-                break;
-
-            case 'STREAM_AUTH_FAIL':
-                authed = false;
-                hideAuthWaiting();
-                setStatus('yellow', 'connected · needs auth');
-                showAuthError('Cheie incorectă. Încearcă din nou.');
-                re_enableAuthBtn();
-                break;
-
-            // ── STREAM SIGNALING (only processed if authed) ──────
-            case 'VIEWER_JOINED':
-                if (!authed) return;
-                log('viewer conectat · ' + msg.viewerId.substr(0, 8));
-                await createOffer(msg.viewerId);
-                break;
-
-            case 'STREAM_ANSWER':
-                if (!authed) return;
-                if (peerConns[msg.viewerId]) {
-                    await peerConns[msg.viewerId]
-                          .setRemoteDescription({ type: 'answer', sdp: msg.sdp })
-                          .catch(() => {});
-                }
-                break;
-
-            case 'STREAM_ICE':
-                if (!authed) return;
-                if (peerConns[msg.viewerId] && msg.candidate) {
-                    peerConns[msg.viewerId]
-                        .addIceCandidate(msg.candidate)
-                        .catch(() => {});
-                }
-                break;
-
-            case 'VIEWER_LEFT':
-                if (!authed) return;
-                closePeer(msg.viewerId);
-                break;
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  AUTH FLOW
-    // ════════════════════════════════════════════════════════════
-    function submitAuth() {
-        const key = document.getElementById('stream-key').value.trim();
-        if (!key) {
-            shakeInput();
-            return;
-        }
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            showToast('Nu ești conectat la server');
-            return;
-        }
-
-        // Disable button + show spinner while waiting for server
-        document.getElementById('auth-btn').disabled = true;
-        document.getElementById('auth-waiting').style.display = 'block';
-        document.getElementById('auth-error').style.display = 'none';
-
-        // Send key to server — response comes back as STREAM_AUTH_OK / STREAM_AUTH_FAIL
-        ws.send(JSON.stringify({
-            type: 'STREAM_AUTH',
-            key: key,
-            camId: camId,
-            role: 'streamer'
-        }));
-    }
-
-    function hideAuthWaiting() {
-        document.getElementById('auth-waiting').style.display = 'none';
-    }
-
-    function showAuthError(msg) {
-        const el = document.getElementById('auth-error');
-        el.textContent = msg;
-        el.style.display = 'block';
-        shakeInput();
-    }
-
-    function re_enableAuthBtn() {
-        const btn = document.getElementById('auth-btn');
-        btn.disabled = false;
-    }
-
-    function shakeInput() {
-        const el = document.getElementById('stream-key');
-        el.classList.add('error');
-        el.value = '';
-        setTimeout(() => el.classList.remove('error'), 500);
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  CAMERA — only called after auth success
-    // ════════════════════════════════════════════════════════════
-    async function initCamera() {
-        try {
-            if (localStream) localStream.getTracks().forEach(t => t.stop());
-
-            // iOS requires exact constraints to be minimal — start with ideal
-            const constraints = {
-                video: {
-                    facingMode: { ideal: facingMode },
-                    width:  { ideal: quality.width  },
-                    height: { ideal: quality.height },
-                    // helps on older iPhones
-                    frameRate: { ideal: 30, max: 60 }
-                },
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    // avoid issues on some Android devices
-                    channelCount: 1
-                }
-            };
-
-            localStream = await navigator.mediaDevices.getUserMedia(constraints);
-            const vid = document.getElementById('preview-video');
-            vid.srcObject = localStream;
-
-            // iOS sometimes needs a manual play() call
-            try { await vid.play(); } catch (_) {}
-
-        } catch (err) {
-            log('eroare cameră: ' + err.message);
-            showToast('Eroare cameră: ' + err.message);
-        }
-    }
-
-    function setQuality(key, btn) {
-        if (streaming) { showToast('Oprește stream-ul mai întâi'); return; }
-        document.querySelectorAll('.q-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        quality = qualityMap[key];
-        // Re-init camera with new quality (only if already authed)
-        if (authed && localStream) initCamera();
-    }
-
-    function flipCamera() {
-        if (streaming) { showToast('Oprește stream-ul pentru a schimba camera'); return; }
-        facingMode = facingMode === 'environment' ? 'user' : 'environment';
-        if (authed) initCamera();
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  STREAM START / STOP
-    //  Security: send() is wrapped — silently ignored if !authed
-    // ════════════════════════════════════════════════════════════
-    function safeSend(payload) {
-        if (!authed || !ws || ws.readyState !== WebSocket.OPEN) return;
-        ws.send(JSON.stringify(payload));
-    }
-
-    async function startStream() {
-        if (!authed)        { showToast('Autentifică-te mai întâi'); return; }
-        if (!localStream)   { showToast('Nicio cameră disponibilă'); return; }
-        if (streaming)      return;
-
-        streaming = true;
-        document.getElementById('start-btn').style.display = 'none';
-        document.getElementById('stop-btn').style.display  = 'flex';
-        document.getElementById('live-badge').classList.add('active');
-        document.getElementById('flip-btn').disabled = true;
-
-        safeSend({ type: 'STREAM_START', camId, label: camId });
-        await acquireWakeLock();
-        log('live · stream activ');
-    }
-
-    function stopStream() {
-        if (!streaming) return;
-        streaming = false;
-
-        document.getElementById('start-btn').style.display = 'flex';
-        document.getElementById('stop-btn').style.display  = 'none';
-        document.getElementById('live-badge').classList.remove('active');
-        document.getElementById('flip-btn').disabled = false;
-
-        Object.keys(peerConns).forEach(id => closePeer(id));
-
-        safeSend({ type: 'STREAM_STOP', camId });
-        log('stream oprit');
-    }
-
-    function forceStopStream() {
-        streaming = false;
-        Object.keys(peerConns).forEach(id => closePeer(id));
-        document.getElementById('start-btn').style.display  = 'flex';
-        document.getElementById('stop-btn').style.display   = 'none';
-        document.getElementById('live-badge').classList.remove('active');
-        document.getElementById('flip-btn').disabled = false;
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  WebRTC
-    // ════════════════════════════════════════════════════════════
-    async function createOffer(viewerId) {
-        if (!streaming || !localStream || !authed) return;
-
-        const pc = new RTCPeerConnection({
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302'  },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-        });
-        peerConns[viewerId] = pc;
-
-        // Add all tracks
-        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
-        pc.onicecandidate = (e) => {
-            if (e.candidate) {
-                safeSend({
-                    type: 'STREAM_ICE',
-                    candidate: e.candidate,
-                    viewerId,
-                    from: 'streamer',
-                    camId
-                });
-            }
-        };
-
-        pc.onconnectionstatechange = () => {
-            if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-                closePeer(viewerId);
-            }
-        };
-
-        const offer = await pc.createOffer({
-            offerToReceiveAudio: false,
-            offerToReceiveVideo: false
-        });
-        await pc.setLocalDescription(offer);
-
-        safeSend({ type: 'STREAM_OFFER', sdp: offer.sdp, viewerId, camId });
-    }
-
-    function closePeer(viewerId) {
-        if (peerConns[viewerId]) {
-            try { peerConns[viewerId].close(); } catch (_) {}
-            delete peerConns[viewerId];
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  HELPERS
-    // ════════════════════════════════════════════════════════════
-    function log(msg) {
-        document.getElementById('status-log').textContent = msg;
-    }
-
-    function startPing() {
+    ws.onclose = () => {
+        setStatus('red', 'disconnected');
+        authed = false;
         stopPing();
-        pingInterval = setInterval(() => {
-            if (ws?.readyState === WebSocket.OPEN)
-                ws.send(JSON.stringify({ type: 'PING' }));
-        }, 25000);
+        if (streaming) forceStopStream();
+        showScreen('connecting-screen');
+        scheduleReconnect();
+    };
+
+    ws.onerror = () => setStatus('red', 'error');
+}
+
+function scheduleReconnect() {
+    const delay = Math.min(1500 * Math.pow(1.5, reconnectAttempts), 20000);
+    reconnectAttempts++;
+    setTimeout(connectWS, delay);
+}
+
+// ════════════════════════════════════════════════════════════
+//  MESSAGE HANDLER
+// ════════════════════════════════════════════════════════════
+async function handleMsg(msg) {
+    switch (msg.type) {
+
+        case 'STREAM_AUTH_OK':
+            authed = true;
+            saveSession(savedKey, camId);
+            setStatus('green', 'autentificat');
+            hideAuthWaiting();
+            await autodetectQuality();
+            await initCamera();
+            showScreen('stream-screen');
+            if (el('cam-id-display')) el('cam-id-display').textContent = 'cam ' + camId;
+            await acquireWakeLock();
+            log('cameră pornită · pregătit de stream');
+            break;
+
+        case 'STREAM_AUTH_FAIL':
+            authed = false;
+            clearSession();
+            savedKey = '';
+            hideAuthWaiting();
+            setStatus('yellow', 'connected · needs auth');
+            showAuthError('Cheie incorectă. Încearcă din nou.');
+            re_enableAuthBtn();
+            showScreen('auth-screen');
+            break;
+
+        case 'VIEWER_JOINED':
+            if (!authed || !msg.viewerId) return;
+            log('viewer · ' + String(msg.viewerId).substr(0, 8));
+            await createOffer(msg.viewerId);
+            break;
+
+        case 'STREAM_ANSWER':
+            if (!authed || !msg.viewerId || !peerConns[msg.viewerId]) return;
+            await peerConns[msg.viewerId]
+                  .setRemoteDescription({ type: 'answer', sdp: msg.sdp })
+                  .catch(() => {});
+            break;
+
+        case 'STREAM_ICE':
+            if (!authed || !msg.viewerId || !msg.candidate || !peerConns[msg.viewerId]) return;
+            peerConns[msg.viewerId].addIceCandidate(msg.candidate).catch(() => {});
+            break;
+
+        case 'VIEWER_LEFT':
+            if (msg.viewerId) closePeer(msg.viewerId);
+            break;
+
+        case 'RECORDING_STARTED':
+            if (authed) { startMediaRecorder(); log('🔴 recording'); }
+            break;
+
+        case 'RECORDING_STOPPED':
+            if (authed) { stopMediaRecorder(); log('⏹ stopped'); }
+            break;
+
+        // Intentionally ignored on this page
+        case 'PONG':
+        case 'SYNC_STATE':
+        case 'TIME_SYNC':
+        case 'MODE_CHANGED':
+        case 'UPDATE_LOBBY':
+            break;
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+//  AUTH
+// ════════════════════════════════════════════════════════════
+function submitAuth() {
+    const keyInput = el('stream-key');
+    const key = keyInput ? keyInput.value.trim() : '';
+    if (!key) { shakeInput(); return; }
+    if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Nu ești conectat la server'); return; }
+
+    savedKey = key;
+    if (el('auth-btn'))     el('auth-btn').disabled   = true;
+    if (el('auth-waiting')) el('auth-waiting').style.display = 'block';
+    if (el('auth-error'))   el('auth-error').style.display   = 'none';
+
+    ws.send(JSON.stringify({ type: 'STREAM_AUTH', key, camId, role: 'streamer' }));
+}
+
+function hideAuthWaiting() {
+    if (el('auth-waiting')) el('auth-waiting').style.display = 'none';
+}
+
+function showAuthError(msg) {
+    const e = el('auth-error');
+    if (e) { e.textContent = msg; e.style.display = 'block'; }
+    shakeInput();
+}
+
+function re_enableAuthBtn() {
+    if (el('auth-btn')) el('auth-btn').disabled = false;
+}
+
+function shakeInput() {
+    const e = el('stream-key');
+    if (!e) return;
+    e.classList.add('error');
+    e.value = '';
+    setTimeout(() => e.classList.remove('error'), 500);
+}
+
+// Logout / change cam — clears session and returns to auth screen
+function logoutStream() {
+    clearSession();
+    savedKey = '';
+    authed   = false;
+    if (streaming) stopStream();
+    if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'STREAM_STOP', camId }));
+    camId = 'cam-' + Math.random().toString(36).substr(2, 5).toUpperCase();
+    showScreen('auth-screen');
+    setStatus('yellow', 'connected · needs auth');
+}
+
+// ════════════════════════════════════════════════════════════
+//  CAMERA
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Returns navigator.mediaDevices or null.
+ * On plain HTTP (non-localhost) the API is blocked by browsers — show a clear
+ * error and attempt an HTTPS redirect so the user isn't left confused.
+ */
+function getMediaDevices() {
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        return navigator.mediaDevices;
+    }
+    // Should not normally reach here — school-server.js auto-redirects
+    // /stream on HTTP → https://<ip>:8443/stream before this JS even loads.
+    // Belt-and-suspenders: redirect manually if we somehow ended up on HTTP.
+    const httpsUrl = 'https://' + location.hostname + ':8443' + location.pathname + location.search;
+    log('⚠ Redirecționare HTTPS...');
+    setTimeout(() => { location.href = httpsUrl; }, 800);
+    return null;
+}
+
+/** Update the single active quality pill — clears all first, then sets one. */
+function setActivePill(key) {
+    document.querySelectorAll('.q-btn, .q-pill').forEach(b => b.classList.remove('active'));
+    const btn = el('q-' + key);
+    if (btn) btn.classList.add('active');
+}
+
+/**
+ * Auto-detect the highest resolution the rear camera supports.
+ * Uses getCapabilities() when available (Android Chrome), otherwise probes
+ * with exact constraints one at a time (fallback for older browsers).
+ */
+async function autodetectQuality() {
+    if (quality) return;
+    const md = getMediaDevices();
+    if (!md) {
+        quality = { width: 1280, height: 720 }; qualityKey = 'hd';
+        setActivePill(qualityKey); updateQualityBadge(); return;
     }
 
-    function stopPing() {
-        if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+    // Attempt 1: open a temporary stream and read getCapabilities()
+    try {
+        const tmp = await md.getUserMedia({ video: { facingMode: { ideal: facingMode } }, audio: false });
+        const track = tmp.getVideoTracks()[0];
+        if (track && typeof track.getCapabilities === 'function') {
+            const caps = track.getCapabilities();
+            const maxW = caps.width?.max || 0;
+            track.stop(); tmp.getTracks().forEach(t => t.stop());
+            if      (maxW >= 3840) { quality = { width: 3840, height: 2160 }; qualityKey = '4k';  }
+            else if (maxW >= 1920) { quality = { width: 1920, height: 1080 }; qualityKey = 'fhd'; }
+            else                   { quality = { width: 1280, height: 720  }; qualityKey = 'hd';  }
+            setActivePill(qualityKey); updateQualityBadge(); return;
+        }
+        tmp.getTracks().forEach(t => t.stop());
+    } catch (_) {}
+
+    // Attempt 2: probe with exact constraints
+    const probes = [
+        { key: '4k',  w: 3840, h: 2160 },
+        { key: 'fhd', w: 1920, h: 1080 },
+        { key: 'hd',  w: 1280, h: 720  },
+    ];
+    for (const p of probes) {
+        try {
+            const t = await md.getUserMedia({
+                video: { facingMode: { ideal: facingMode }, width: { exact: p.w }, height: { exact: p.h } },
+                audio: false,
+            });
+            t.getTracks().forEach(t => t.stop());
+            quality = { width: p.w, height: p.h }; qualityKey = p.key;
+            setActivePill(qualityKey); updateQualityBadge(); return;
+        } catch (_) {}
     }
 
-    // ════════════════════════════════════════════════════════════
-    //  WAKE LOCK — aggressive, always-on once streaming starts
-    //  Tries every possible method to keep the screen alive.
-    //  Re-acquires automatically on any release event.
-    // ════════════════════════════════════════════════════════════
-    let wakeLock = null;
-    let wakeLockRetryTimer = null;
+    // Safe fallback
+    quality = { width: 1280, height: 720 }; qualityKey = 'hd';
+    setActivePill(qualityKey); updateQualityBadge();
+}
 
-    async function acquireWakeLock() {
-        // Method 1: Screen Wake Lock API (Chrome 84+, Safari 16.4+)
-        if ('wakeLock' in navigator) {
-            try {
-                if (wakeLock && wakeLock.released === false) return; // already held
-                wakeLock = await navigator.wakeLock.request('screen');
-                wakeLock.addEventListener('release', () => {
-                    // Re-acquire immediately if it got released by the OS
-                    if (streaming || authed) {
-                        scheduleWakeLockRetry();
-                    }
-                });
-                return; // success
-            } catch (_) {}
+async function initCamera() {
+    const md = getMediaDevices();
+    if (!md) return;
+    try {
+        if (localStream) localStream.getTracks().forEach(t => t.stop());
+
+        const constraints = {
+            video: {
+                facingMode: { ideal: facingMode },
+                frameRate:  { ideal: 30, max: 60 },
+            },
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                channelCount: 1,
+            },
+        };
+        if (quality) {
+            constraints.video.width  = { ideal: quality.width  };
+            constraints.video.height = { ideal: quality.height };
         }
 
-        // Method 2: NoSleep fallback — play a tiny silent video loop
-        // This keeps the screen on in browsers that don't support Wake Lock API
-        startNoSleepVideo();
-    }
+        localStream = await md.getUserMedia(constraints);
+        const vid = el('preview-video');
+        if (vid) { vid.srcObject = localStream; try { await vid.play(); } catch (_) {} }
 
-    function scheduleWakeLockRetry() {
-        if (wakeLockRetryTimer) clearTimeout(wakeLockRetryTimer);
-        // Retry after 500ms — handles the case where OS releases it momentarily
-        wakeLockRetryTimer = setTimeout(acquireWakeLock, 500);
-    }
-
-    // NoSleep fallback: a 1x1 transparent video loop tricks browsers
-    // into thinking media is playing, preventing sleep
-    let noSleepVideo = null;
-    function startNoSleepVideo() {
-        if (noSleepVideo) return;
-        noSleepVideo = document.createElement('video');
-        noSleepVideo.setAttribute('playsinline', '');
-        noSleepVideo.setAttribute('webkit-playsinline', '');
-        noSleepVideo.muted = true;
-        noSleepVideo.loop = true;
-        // Minimal valid MP4 — a 1×1 black frame, 1s, base64
-        noSleepVideo.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAA3JtZGF0AAACrQYF//+p3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE1NSByMjkwMSBhOWY5NmE4IC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAxOCAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAAFZliIQAV/8EKAAABQAA=';
-        noSleepVideo.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0.01;pointer-events:none;';
-        document.body.appendChild(noSleepVideo);
-        noSleepVideo.play().catch(() => {});
-    }
-
-    function stopNoSleepVideo() {
-        if (noSleepVideo) {
-            noSleepVideo.pause();
-            noSleepVideo.remove();
-            noSleepVideo = null;
+    } catch (err) {
+        if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
+            log('⚠ Permisiune cameră refuzată');
+            showToast('Permite accesul la cameră în setările browserului');
+        } else {
+            log('⚠ eroare cameră: ' + (err?.message || String(err)));
+            showToast('Eroare cameră: ' + (err?.message || String(err)));
         }
     }
+}
 
-    // Re-acquire on every possible lifecycle event
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && (streaming || authed)) {
-            acquireWakeLock();
+function setQuality(key, _btn) {
+    if (streaming) { showToast('Oprește stream-ul mai întâi'); return; }
+    qualityKey = key;
+    if (qualityMap[key]) quality = qualityMap[key];
+    setActivePill(key);
+    updateQualityBadge();
+    if (authed && localStream) initCamera();
+}
+
+function flipCamera() {
+    if (streaming) { showToast('Oprește stream-ul pentru a schimba camera'); return; }
+    facingMode = facingMode === 'environment' ? 'user' : 'environment';
+    if (authed) initCamera();
+}
+
+// ════════════════════════════════════════════════════════════
+//  STREAM START / STOP
+// ════════════════════════════════════════════════════════════
+function safeSend(payload) {
+    if (!authed || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(payload));
+}
+
+async function startStream() {
+    if (!authed)      { showToast('Autentifică-te mai întâi'); return; }
+    if (!localStream) { showToast('Nicio cameră disponibilă'); return; }
+    if (streaming)    return;
+
+    streaming = true;
+    if (el('start-btn')) el('start-btn').style.display = 'none';
+    if (el('stop-btn'))  el('stop-btn').style.display  = 'flex';
+    if (el('live-badge')) el('live-badge').classList.add('active');
+    if (el('flip-btn'))  el('flip-btn').disabled = true;
+
+    safeSend({ type: 'STREAM_START', camId, label: camId });
+    await acquireWakeLock();
+    log('live · stream activ');
+}
+
+function stopStream() {
+    if (!streaming) return;
+    streaming = false;
+
+    if (el('start-btn')) el('start-btn').style.display = 'flex';
+    if (el('stop-btn'))  el('stop-btn').style.display  = 'none';
+    if (el('live-badge')) el('live-badge').classList.remove('active');
+    if (el('flip-btn'))  el('flip-btn').disabled = false;
+
+    Object.keys(peerConns).forEach(id => closePeer(id));
+    if (recording) stopMediaRecorder();
+    safeSend({ type: 'STREAM_STOP', camId });
+    log('stream oprit');
+}
+
+function forceStopStream() {
+    streaming = false;
+    Object.keys(peerConns).forEach(id => closePeer(id));
+    if (recording) stopMediaRecorder();
+    if (el('start-btn')) el('start-btn').style.display = 'flex';
+    if (el('stop-btn'))  el('stop-btn').style.display  = 'none';
+    if (el('live-badge')) el('live-badge').classList.remove('active');
+    if (el('flip-btn'))  el('flip-btn').disabled = false;
+}
+
+// ════════════════════════════════════════════════════════════
+//  WebRTC
+// ════════════════════════════════════════════════════════════
+async function createOffer(viewerId) {
+    if (!streaming || !localStream || !authed) return;
+
+    const pc = new RTCPeerConnection({
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302'  },
+            { urls: 'stun:stun1.l.google.com:19302' },
+        ],
+    });
+    peerConns[viewerId] = pc;
+
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    pc.onicecandidate = e => {
+        if (e.candidate) safeSend({ type: 'STREAM_ICE', candidate: e.candidate, viewerId, from: 'streamer', camId });
+    };
+
+    pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') closePeer(viewerId);
+    };
+
+    try {
+        const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
+        await pc.setLocalDescription(offer);
+        safeSend({ type: 'STREAM_OFFER', sdp: offer.sdp, viewerId, camId });
+    } catch (_) { closePeer(viewerId); }
+}
+
+function closePeer(viewerId) {
+    if (peerConns[viewerId]) {
+        try { peerConns[viewerId].close(); } catch (_) {}
+        delete peerConns[viewerId];
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+//  MEDIA RECORDER — binary WebM → school server :5890
+// ════════════════════════════════════════════════════════════
+function startMediaRecorder() {
+    if (recording || !localStream || typeof MediaRecorder === 'undefined') {
+        if (typeof MediaRecorder === 'undefined') log('⚠ MediaRecorder not supported');
+        return;
+    }
+    if (videoWs) { try { videoWs.close(); } catch (_) {} videoWs = null; }
+
+    try { videoWs = new WebSocket(VIDEO_WS_URL); }
+    catch (e) { log('⚠ videoWs: ' + e.message); return; }
+
+    videoWs.binaryType = 'arraybuffer';
+
+    videoWs.onopen = () => {
+        videoWs.send(JSON.stringify({ type: 'STREAM_AUTH', key: savedKey, camId, label: camId }));
+    };
+
+    videoWs.onmessage = e => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        if (msg.type === 'STREAM_AUTH_OK')   actuallyStartMediaRecorder();
+        if (msg.type === 'STREAM_AUTH_FAIL') { log('⚠ video auth fail'); try { videoWs.close(); } catch(_){} videoWs = null; }
+    };
+
+    videoWs.onerror = () => log('⚠ video WS error');
+    videoWs.onclose = () => { if (recording) stopMediaRecorder(); };
+}
+
+function actuallyStartMediaRecorder() {
+    if (!localStream || !videoWs || videoWs.readyState !== WebSocket.OPEN) return;
+
+    const mimeType = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+        .find(t => MediaRecorder.isTypeSupported(t)) || 'video/webm';
+
+    try {
+        mediaRec = new MediaRecorder(localStream, { mimeType, videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 128_000 });
+    } catch (e) { log('⚠ MediaRecorder: ' + e.message); return; }
+
+    mediaRec.ondataavailable = e => {
+        if (!e.data || e.data.size === 0 || !videoWs || videoWs.readyState !== WebSocket.OPEN) return;
+        e.data.arrayBuffer().then(buf => {
+            if (videoWs && videoWs.readyState === WebSocket.OPEN) videoWs.send(buf);
+        }).catch(() => {});
+    };
+
+    mediaRec.onstop  = () => { recording = false; };
+    mediaRec.onerror = e  => { log('⚠ recorder: ' + (e.error?.message || '')); stopMediaRecorder(); };
+
+    recording = true;
+    videoWs.send(JSON.stringify({ type: 'STREAM_START', camId, label: camId }));
+    mediaRec.start(1000);
+    log('🔴 recording · ' + mimeType);
+}
+
+function stopMediaRecorder() {
+    recording = false;
+    if (mediaRec && mediaRec.state !== 'inactive') { try { mediaRec.stop(); } catch (_) {} }
+    mediaRec = null;
+    if (videoWs) {
+        if (videoWs.readyState === WebSocket.OPEN) {
+            try { videoWs.send(JSON.stringify({ type: 'STREAM_STOP', camId })); } catch (_) {}
         }
-    });
-    window.addEventListener('focus', () => {
-        if (streaming || authed) acquireWakeLock();
-    });
-    window.addEventListener('pageshow', () => {
-        if (streaming || authed) acquireWakeLock();
-    });
-    // Some Android browsers fire this when the screen un-dims
-    document.addEventListener('resume', () => {
-        if (streaming || authed) acquireWakeLock();
-    });
+        setTimeout(() => { try { videoWs.close(); } catch (_) {} videoWs = null; }, 400);
+    }
+}
 
-    // ════════════════════════════════════════════════════════════
-    //  INIT — connect to WS immediately on load
-    // ════════════════════════════════════════════════════════════
-    window.addEventListener('load', () => {
-        connectWS();
-    });
-    
+// ════════════════════════════════════════════════════════════
+//  PING / WAKE LOCK
+// ════════════════════════════════════════════════════════════
+function startPing() {
+    stopPing();
+    pingInterval = setInterval(() => {
+        if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PING' }));
+    }, 25000);
+}
+
+function stopPing() {
+    if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+}
+
+let wakeLock = null, wakeLockRetryTimer = null;
+
+async function acquireWakeLock() {
+    if ('wakeLock' in navigator) {
+        try {
+            if (wakeLock && !wakeLock.released) return;
+            wakeLock = await navigator.wakeLock.request('screen');
+            wakeLock.addEventListener('release', () => {
+                if (streaming || authed) scheduleWakeLockRetry();
+            });
+            return;
+        } catch (_) {}
+    }
+    startNoSleepVideo();
+}
+
+function scheduleWakeLockRetry() {
+    if (wakeLockRetryTimer) clearTimeout(wakeLockRetryTimer);
+    wakeLockRetryTimer = setTimeout(acquireWakeLock, 500);
+}
+
+let noSleepVideo = null;
+function startNoSleepVideo() {
+    if (noSleepVideo) return;
+    noSleepVideo = document.createElement('video');
+    noSleepVideo.setAttribute('playsinline', '');
+    noSleepVideo.setAttribute('webkit-playsinline', '');
+    noSleepVideo.muted = true;
+    noSleepVideo.loop  = true;
+    noSleepVideo.src   = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAA3JtZGF0AAACrQYF//+p3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE1NSByMjkwMSBhOWY5NmE4IC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAxOCAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAAFZliIQAV/8EKAAABQAA=';
+    noSleepVideo.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0.01;pointer-events:none;';
+    document.body.appendChild(noSleepVideo);
+    noSleepVideo.play().catch(() => {});
+}
+
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (streaming || authed)) acquireWakeLock(); });
+window.addEventListener('focus',    () => { if (streaming || authed) acquireWakeLock(); });
+window.addEventListener('pageshow', () => { if (streaming || authed) acquireWakeLock(); });
+document.addEventListener('resume', () => { if (streaming || authed) acquireWakeLock(); });
+
+// ════════════════════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════════════════════
+window.addEventListener('load', () => {
+    // Pre-fill key input if a saved session exists
+    if (savedKey && el('stream-key')) el('stream-key').value = savedKey;
+    connectWS();
+});

@@ -1,0 +1,12 @@
+[req]
+req_extensions=v3_req
+distinguished_name=dn
+prompt=no
+[dn]
+CN=rapidtyper.local
+[v3_req]
+subjectAltName=@alt
+[alt]
+IP.1=192.168.1.3
+IP.2=127.0.0.1
+DNS.1=localhost

@@ -1,89 +1,99 @@
-/**
- * presentation.js — updated
- * Adds camera feed display to the presentation screen.
- * When a host assigns a camera to this screen, a WebRTC stream appears
- * as a picture-in-picture overlay on any screen, or full-screen if set.
- */
+'use strict';
 
-const WS_URL = `ws://${location.hostname || 'localhost'}:5889`;
+const WS_URL = window.__WS_URL__ || (() => {
+    const proto  = location.protocol === 'https:' ? 'wss' : 'ws';
+    const host   = location.hostname || 'localhost';
+    const wsPort = (location.port === '5890' || location.port === '8080') ? ':5889'
+                 : location.port ? ':' + location.port : '';
+    return `${proto}://${host}${wsPort}`;
+})();
 
-let ws, gamePhase = 'LOBBY', players = [];
-let raceStartTime = null, raceDuration = 20;
-let timerInterval = null, confettiTriggered = false;
+let ws;
+let gamePhase         = 'LOBBY';
+let gameMode          = 'race';
+let players           = [];
+let spellers          = [];
+let raceStartTime     = null;
+let raceDuration      = 20;
+let timerInterval     = null;
+let confettiTriggered = false;
 let reconnectAttempts = 0;
-let currentRound = 0, maxRounds = 0;
-let cdInterval = null;
-
-// ── Camera feed state ──────────────────────────────────────────────────────
-let camPc        = null;          // RTCPeerConnection
-let camStream    = null;          // MediaStream from camera
-let camAssigned  = null;          // { schoolId, camId }
-let wsId         = null;          // our server-assigned WS ID
-let pipMode      = 'pip';         // 'pip' | 'fullscreen'
+let currentRound      = 0;
+let maxRounds         = 0;
+let cdInterval        = null;
+let camPc             = null;
+let camViewerId       = null;
 
 function connect() {
     ws = new WebSocket(WS_URL);
-
     ws.onopen = () => {
         reconnectAttempts = 0;
         ws.send(JSON.stringify({ type: 'PRESENTATION_JOIN' }));
         showScreen('lobby-screen');
     };
-
     ws.onclose = () => {
         showScreen('connecting-screen');
         const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 15000);
         reconnectAttempts++;
         setTimeout(connect, delay);
     };
-
     ws.onerror = () => {};
-
-    ws.onmessage = (e) => {
-        // Binary = video chunk (raw WebM from school relay)
-        if (e.data instanceof Blob) {
-            e.data.arrayBuffer().then(buf => handleBinaryMessage(buf));
-            return;
-        }
-        try { handleMessage(JSON.parse(e.data)); } catch (_) {}
-    };
-}
-
-function handleBinaryMessage(buf) {
-    // Header = first 256 bytes (zero-padded JSON)
-    const headerStr = new TextDecoder().decode(buf.slice(0,256)).replace(/\0+$/,'');
-    try {
-        const header = JSON.parse(headerStr);
-        if (header.type === 'VIDEO_CHUNK') {
-            // We have a raw webm chunk — pipe to MediaSource if we're using MSE fallback
-            feedMseChunk(buf.slice(256));
-        }
-    } catch(e) {}
+    ws.onmessage = e => { try { handleMessage(JSON.parse(e.data)); } catch (_) {} };
 }
 
 function handleMessage(data) {
     switch (data.type) {
+
         case 'FULL_STATE_SYNC':
             gamePhase = data.state?.phase || gamePhase;
-            if (data.wsId) wsId = data.wsId;
-            // Receive initial camera list (used when presentation first connects mid-session)
-            if (data.cameras) updateCameraList(data.cameras);
+            gameMode  = data.state?.mode  || gameMode;
             updateUI();
             break;
 
         case 'UPDATE_LOBBY':
             if (data.players) players = data.players;
             gamePhase = data.phase || gamePhase;
+            if (data.mode) gameMode = data.mode;
             updateRoundBadges();
             if (gamePhase === 'LOBBY' || gamePhase === 'COUNTDOWN') renderLobby();
             else if (gamePhase === 'RACING') renderRacing();
+            break;
+
+        case 'UPDATE_SPELLERS':
+            if (data.spellers) spellers = data.spellers;
+            if (gameMode === 'spell') {
+                const cnt = document.getElementById('lobby-count');
+                if (cnt) cnt.textContent = spellers.length;
+                renderSpellerLobby();
+                if (gamePhase === 'SPELL_ACTIVE') updateSpellSubmissions();
+            }
+            break;
+
+        case 'MODE_CHANGED':
+            gameMode = data.mode || gameMode;
+            renderLobbyModeBadge();
+            if (gamePhase === 'LOBBY') renderLobby();
+            break;
+
+        case 'SPELL_START':
+            gamePhase = 'SPELL_ACTIVE';
+            if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
+            updateRoundBadges();
+            showScreen('spell-active-screen');
+            renderSpellActive();
+            break;
+
+        case 'SPELL_END':
+            gamePhase = 'LOBBY';
+            showScreen('lobby-screen');
+            renderLobby();
             break;
 
         case 'START_GAME':
             gamePhase = 'RACING';
             if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
             raceStartTime = data.startTime || Date.now();
-            raceDuration = data.duration || 20;
+            raceDuration  = data.duration  || 20;
             confettiTriggered = false;
             updateRoundBadges();
             showScreen('racing-screen');
@@ -93,6 +103,7 @@ function handleMessage(data) {
         case 'GAME_OVER':
             gamePhase = 'FINISHED';
             if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
+            if (data.players) players = data.players;
             stopRaceTimer();
             updateRoundBadges();
             showScreen('results-screen');
@@ -102,318 +113,167 @@ function handleMessage(data) {
         case 'SERIES_COMPLETE':
         case 'SERIES_OVER':
             setTimeout(() => {
-                gamePhase = 'LOBBY';
-                confettiTriggered = false;
+                gamePhase = 'LOBBY'; confettiTriggered = false;
                 currentRound = 0; maxRounds = 0;
-                updateRoundBadges();
-                players = [];
-                showScreen('lobby-screen');
-                renderLobby();
+                updateRoundBadges(); players = [];
+                showScreen('lobby-screen'); renderLobby();
             }, 15000);
             break;
 
         case 'FORCE_RESET':
-            gamePhase = 'LOBBY';
-            confettiTriggered = false;
-            stopRaceTimer();
-            currentRound = 0; maxRounds = 0;
-            updateRoundBadges();
-            players = [];
-            showScreen('lobby-screen');
-            renderLobby();
+            gamePhase = 'LOBBY'; confettiTriggered = false;
+            stopRaceTimer(); currentRound = 0; maxRounds = 0;
+            updateRoundBadges(); players = []; spellers = [];
+            showScreen('lobby-screen'); renderLobby();
             break;
 
         case 'COUNTDOWN':
             if (data.round) { currentRound = data.round; maxRounds = data.maxRounds || maxRounds; }
-            if (gamePhase !== 'RACING') {
-                gamePhase = 'COUNTDOWN';
-                runCountdown(data.count);
-            }
+            if (gamePhase !== 'RACING') { gamePhase = 'COUNTDOWN'; runCountdown(data.count); }
             break;
 
-        // ── Camera assignment from host ────────────────────────────────
-        case 'PRESENTATION_CAM_ASSIGNED': {
-            camAssigned = { schoolId: data.schoolId, camId: data.camId, camKey: data.camKey };
-            showCamPip(`Camera: ${data.camId}`);
-            // Camera will offer to us — just set up the PC ready to answer
-            setupCamPeerConnection();
+        // ── Camera PiP ────────────────────────────────────────────────
+        case 'PRESENTATION_CAM_ASSIGNED':
+            startCamView(data.schoolId, data.camId, data.camKey);
             break;
-        }
 
         case 'PRESENTATION_CAM_REMOVED':
-            teardownCamFeed();
+            closeCamView();
             break;
 
-        // WebRTC offer from camera (routed via MainServer → SchoolServer → here)
-        case 'STREAM_OFFER': {
-            if (camPc) {
-                handleCamOffer(data.sdp, data.viewerId);
-            }
+        case 'STREAM_OFFER':
+            if (data.sdp && camPc) answerCamOffer(data.sdp, data.viewerId || camViewerId);
             break;
-        }
 
-        case 'STREAM_ICE_FROM_CAM': {
-            if (camPc && data.candidate) {
-                camPc.addIceCandidate(data.candidate).catch(() => {});
-            }
+        case 'STREAM_ICE_FROM_CAM':
+        case 'STREAM_ICE':
+            if (data.candidate && camPc) camPc.addIceCandidate(data.candidate).catch(() => {});
             break;
-        }
-
-        // Thumbnail update (JPEG preview, low-fps)
-        case 'CAM_THUMBNAIL': {
-            if (camAssigned && data.camKey === `${camAssigned.schoolId}::${camAssigned.camId}`) {
-                updateCamThumbnail('data:image/jpeg;base64,' + data.jpeg);
-            }
-            break;
-        }
     }
 }
 
-// ── Camera PiP ────────────────────────────────────────────────────────────
-
-function setupCamPeerConnection() {
-    closeCamPc();
-    camPc = new RTCPeerConnection({
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-    });
-
-    camPc.ontrack = (e) => {
-        camStream = e.streams[0];
-        const vid = document.getElementById('cam-pip-video');
-        if (vid) {
-            vid.srcObject = camStream;
-            vid.style.display = 'block';
-            document.getElementById('cam-pip-thumb').style.display = 'none';
-        }
-    };
-
-    camPc.onicecandidate = (e) => {
-        if (e.candidate && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-                type: 'STREAM_ICE',
-                candidate: e.candidate,
-                from: 'presentation'
-            }));
-        }
-    };
-
-    camPc.onconnectionstatechange = () => {
-        const state = camPc.connectionState;
-        setCamStatus(state === 'connected' ? 'live' : state === 'failed' ? 'error' : 'connecting');
-        if (state === 'failed' || state === 'disconnected') {
-            // Retry after 3s
-            setTimeout(setupCamPeerConnection, 3000);
-        }
-    };
+// ── Screens ──────────────────────────────────────────────────────────────────
+function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
 }
-
-async function handleCamOffer(sdp, viewerId) {
-    if (!camPc) return;
-    await camPc.setRemoteDescription({ type: 'offer', sdp });
-    const answer = await camPc.createAnswer();
-    await camPc.setLocalDescription(answer);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-            type: 'STREAM_ANSWER',
-            sdp: answer.sdp,
-            viewerId,
-            from: 'presentation'
-        }));
-    }
-}
-
-function closeCamPc() {
-    if (camPc) { try { camPc.close(); } catch(e) {} camPc = null; }
-    camStream = null;
-}
-
-function teardownCamFeed() {
-    closeCamPc();
-    camAssigned = null;
-    const pip = document.getElementById('cam-pip');
-    if (pip) pip.style.display = 'none';
-}
-
-// ── PiP overlay UI helpers ─────────────────────────────────────────────────
-
-function showCamPip(label) {
-    let pip = document.getElementById('cam-pip');
-    if (!pip) {
-        pip = document.createElement('div');
-        pip.id = 'cam-pip';
-        pip.style.cssText = `
-            position:fixed; bottom:1.5rem; right:1.5rem; z-index:200;
-            width:320px; background:#1a1b1d; border-radius:10px;
-            border:2px solid #22c55e; overflow:hidden;
-            box-shadow:0 8px 32px rgba(0,0,0,0.5);
-            transition: all 0.3s ease;
-        `;
-        pip.innerHTML = `
-            <div style="position:relative">
-                <video id="cam-pip-video" autoplay muted playsinline style="width:100%;aspect-ratio:16/9;display:none;background:#000"></video>
-                <img  id="cam-pip-thumb" style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#1a1b1d">
-                <div id="cam-pip-status" style="position:absolute;top:6px;left:8px;font-size:0.6rem;font-family:Roboto Mono,monospace;font-weight:700;letter-spacing:0.08em;background:rgba(0,0,0,0.7);color:#22c55e;padding:2px 7px;border-radius:4px">CONNECTING</div>
-                <div style="position:absolute;top:6px;right:8px;display:flex;gap:4px">
-                    <button onclick="toggleCamPipSize()" style="background:rgba(0,0,0,0.6);border:none;color:#fff;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.7rem">⛶</button>
-                    <button onclick="teardownCamFeed()" style="background:rgba(202,71,84,0.8);border:none;color:#fff;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.7rem">✕</button>
-                </div>
-            </div>
-            <div style="padding:0.4rem 0.6rem;font-size:0.65rem;font-family:Roboto Mono,monospace;color:#646669;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" id="cam-pip-label"></div>
-        `;
-        document.body.appendChild(pip);
-    }
-    pip.style.display = 'block';
-    const lbl = document.getElementById('cam-pip-label');
-    if (lbl) lbl.textContent = label;
-}
-
-function toggleCamPipSize() {
-    const pip = document.getElementById('cam-pip');
-    if (!pip) return;
-    if (pip.style.width === '100vw') {
-        pip.style.cssText = pip.style.cssText
-            .replace('width:100vw','width:320px')
-            .replace('bottom:0','bottom:1.5rem')
-            .replace('right:0','right:1.5rem')
-            .replace('border-radius:0','border-radius:10px');
-    } else {
-        pip.style.width = '100vw';
-        pip.style.bottom = '0';
-        pip.style.right = '0';
-        pip.style.borderRadius = '0';
-    }
-}
-
-function setCamStatus(state) {
-    const el = document.getElementById('cam-pip-status');
-    if (!el) return;
-    const map = { live: ['LIVE','#22c55e'], connecting: ['CONNECTING','#e2b714'], error: ['ERROR','#ca4754'] };
-    const [txt, col] = map[state] || ['—','#646669'];
-    el.textContent = txt; el.style.color = col;
-}
-
-function updateCamThumbnail(src) {
-    const img = document.getElementById('cam-pip-thumb');
-    const vid = document.getElementById('cam-pip-video');
-    if (img && (!vid || !vid.srcObject)) {
-        img.src = src;
-        img.style.display = 'block';
-    }
-}
-
-function updateCameraList(cameras) {
-    // No-op here — just stored for reference if needed
-}
-
-// ── MSE fallback for raw WebM chunks ──────────────────────────────────────
-let mseSource = null, mseBuffer = null, mseQueue = [];
-
-function feedMseChunk(chunk) {
-    // Only used if WebRTC is not available
-    if (!camAssigned) return;
-    const vid = document.getElementById('cam-pip-video');
-    if (!vid || vid.srcObject) return; // WebRTC is active, ignore MSE
-
-    if (!mseSource) {
-        mseSource = new MediaSource();
-        vid.src = URL.createObjectURL(mseSource);
-        vid.style.display = 'block';
-        mseSource.addEventListener('sourceopen', () => {
-            mseBuffer = mseSource.addSourceBuffer('video/webm; codecs="vp9,opus"');
-            mseBuffer.addEventListener('updateend', () => {
-                if (mseQueue.length > 0 && !mseBuffer.updating) {
-                    mseBuffer.appendBuffer(mseQueue.shift());
-                }
-            });
-        });
-    }
-
-    if (mseBuffer) {
-        if (!mseBuffer.updating) {
-            mseBuffer.appendBuffer(new Uint8Array(chunk));
-        } else {
-            mseQueue.push(new Uint8Array(chunk));
-        }
-    }
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-//  EXISTING PRESENTATION LOGIC (unchanged from original)
-// ══════════════════════════════════════════════════════════════════════════
 
 function updateRoundBadges() {
     if (!currentRound || !maxRounds) {
-        ['lobby-round-badge','racing-round-badge','results-round-badge'].forEach(id => {
+        ['lobby-round-badge','racing-round-badge','results-round-badge','spell-round-badge'].forEach(id => {
             const el = document.getElementById(id); if (el) el.style.display = 'none';
         });
         return;
     }
     const txt = 'RUNDA ' + currentRound + ' / ' + maxRounds;
-    ['lobby-round-badge','racing-round-badge','results-round-badge'].forEach(id => {
+    ['lobby-round-badge','racing-round-badge','results-round-badge','spell-round-badge'].forEach(id => {
         const el = document.getElementById(id);
         if (el) { el.textContent = txt; el.style.display = 'inline-block'; }
     });
 }
 
-function runCountdown(startNum) {
-    if (cdInterval) clearInterval(cdInterval);
-    showScreen('countdown-screen');
-    let n = startNum || 3;
-    document.getElementById('cd-number').textContent = n;
-    document.getElementById('cd-label').textContent = 'Pregătește-te!';
-    cdInterval = setInterval(() => {
-        n--;
-        if (n > 0) {
-            const el = document.getElementById('cd-number');
-            const clone = el.cloneNode(true);
-            el.parentNode.replaceChild(clone, el);
-            clone.textContent = n;
-        } else {
-            clearInterval(cdInterval); cdInterval = null;
-            document.getElementById('cd-number').textContent = '🏁';
-            document.getElementById('cd-label').textContent = 'START!';
-        }
-    }, 1000);
-}
-
-function showScreen(id) {
-    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-    document.getElementById(id).classList.add('active');
+function renderLobbyModeBadge() {
+    const badge = document.getElementById('lobby-mode-badge');
+    if (!badge) return;
+    if (gameMode === 'spell') {
+        badge.textContent = '🐝  SPELLING BEE';
+        badge.className = 'header-badge mode-spell';
+    } else {
+        badge.textContent = '⌨  FAST TYPER';
+        badge.className = 'header-badge';
+    }
 }
 
 function updateUI() {
-    if (gamePhase === 'RACING')       { showScreen('racing-screen');  renderRacing();  }
-    else if (gamePhase === 'FINISHED') { showScreen('results-screen'); renderResults(); }
-    else                               { showScreen('lobby-screen');   renderLobby();   }
+    renderLobbyModeBadge();
+    if      (gamePhase === 'RACING')        { showScreen('racing-screen');       renderRacing();  }
+    else if (gamePhase === 'FINISHED')      { showScreen('results-screen');      renderResults(); }
+    else if (gamePhase === 'SPELL_ACTIVE')  { showScreen('spell-active-screen'); renderSpellActive(); }
+    else                                    { showScreen('lobby-screen');        renderLobby();   }
 }
 
+// ── Lobby ─────────────────────────────────────────────────────────────────────
 function renderLobby() {
+    renderLobbyModeBadge();
+    const gradeGrid  = document.querySelector('.lobby-grades');
+    const spellPanel = document.getElementById('lobby-spell-list');
+    if (gameMode === 'spell') {
+        if (gradeGrid)  gradeGrid.style.display  = 'none';
+        if (spellPanel) spellPanel.style.display  = 'flex';
+        renderSpellerLobby();
+    } else {
+        if (gradeGrid)  gradeGrid.style.display  = 'grid';
+        if (spellPanel) spellPanel.style.display  = 'none';
+        renderTyperLobby();
+    }
+}
+
+function renderTyperLobby() {
     const groups = { '1-4': [], '5-9': [], '10-12': [] };
     players.forEach(p => { (groups[p.grade] || groups['10-12']).push(p); });
-    document.getElementById('lobby-count').textContent = players.length;
-    ['1-4', '5-9', '10-12'].forEach(g => {
-        document.getElementById(`cnt-${g}`).textContent = groups[g].length;
-        const el = document.getElementById(`list-${g}`);
-        if (!el) return;
-        el.innerHTML = groups[g].length === 0
-            ? '<div style="text-align:center;color:var(--sub);padding:2rem;font-size:0.8rem;letter-spacing:2px;text-transform:uppercase;">—</div>'
-            : groups[g].map(p => `
-                <div class="lobby-player-row">
-                    <div class="player-dot"></div>
-                    <div class="player-name-lbl">${esc(p.username)}</div>
-                </div>`).join('');
+    const cnt = document.getElementById('lobby-count');
+    if (cnt) cnt.textContent = players.length;
+    ['1-4','5-9','10-12'].forEach(g => {
+        const cntEl  = document.getElementById(`cnt-${g}`);
+        const listEl = document.getElementById(`list-${g}`);
+        if (cntEl) cntEl.textContent = groups[g].length;
+        if (!listEl) return;
+        listEl.innerHTML = groups[g].length === 0
+            ? '<div class="grade-empty">—</div>'
+            : groups[g].map(p => `<div class="lobby-player-row"><div class="player-dot"></div><div class="player-name-lbl">${esc(p.username)}</div></div>`).join('');
     });
 }
 
+function renderSpellerLobby() {
+    const cnt = document.getElementById('lobby-count');
+    if (cnt) cnt.textContent = spellers.length;
+    const el = document.getElementById('lobby-spell-list');
+    if (!el) return;
+    if (spellers.length === 0) {
+        el.innerHTML = '<div class="grade-empty" style="padding:3rem;text-align:center;width:100%">Niciun speler conectat</div>';
+        return;
+    }
+    const sorted = [...spellers].sort((a,b) => (a.grade||'').localeCompare(b.grade||'') || (a.username||'').localeCompare(b.username||''));
+    el.innerHTML = sorted.map(s => `
+        <div class="spell-lobby-card">
+            <div class="player-dot" style="background:var(--main);box-shadow:0 0 6px var(--main)"></div>
+            <div class="spell-card-name">${esc(s.username)}</div>
+            <div class="spell-card-grade">${esc(s.grade)}</div>
+            ${s.submitted ? '<div class="spell-card-done">✓</div>' : ''}
+        </div>`).join('');
+}
+
+// ── Spell active screen ───────────────────────────────────────────────────────
+function renderSpellActive() {
+    updateSpellSubmissions();
+}
+
+function updateSpellSubmissions() {
+    const submitted = spellers.filter(s => s.submitted).length;
+    const subEl     = document.getElementById('spell-submitted-count');
+    const totalEl   = document.getElementById('spell-total-count');
+    if (subEl)   subEl.textContent   = submitted;
+    if (totalEl) totalEl.textContent = spellers.length;
+
+    const grid = document.getElementById('spell-status-grid');
+    if (!grid) return;
+    grid.innerHTML = spellers.map(s => `
+        <div class="spell-status-chip ${s.submitted ? 'done' : ''}">
+            ${esc(s.username)}${s.submitted ? ' <span style="color:var(--green)">✓</span>' : ''}
+        </div>`).join('');
+}
+
+// ── Racing ────────────────────────────────────────────────────────────────────
 function renderRacing() {
     const sorted = [...players].sort((a, b) => (b.progress || 0) - (a.progress || 0));
-    document.getElementById('race-tracks').innerHTML = sorted.map((p, i) => {
+    const tracksEl = document.getElementById('race-tracks');
+    if (!tracksEl) return;
+
+    tracksEl.innerHTML = sorted.map((p, i) => {
         const prog = p.progress || 0;
         const lead = i === 0 && prog > 0;
-        const rc = ['r1','r2','r3'][i] || '';
+        const rc   = ['r1','r2','r3'][i] || '';
         return `
         <div class="race-row ${lead ? 'leading' : ''}">
             <div class="race-rank ${rc}">${i + 1}</div>
@@ -432,26 +292,29 @@ function renderRacing() {
         </div>`;
     }).join('');
 
-    document.getElementById('stat-players').textContent = players.length;
-    document.getElementById('stat-finished').textContent = players.filter(p => p.finished).length;
+    const sp = document.getElementById('stat-players');
+    const sf = document.getElementById('stat-finished');
+    if (sp) sp.textContent = players.length;
+    if (sf) sf.textContent = players.filter(p => p.finished).length;
 
-    const leader = sorted[0];
-    if (leader && (leader.progress || 0) > 0) {
-        document.getElementById('leader-card').innerHTML = `
+    const leader     = sorted[0];
+    const leaderCard = document.getElementById('leader-card');
+    if (leaderCard && leader && (leader.progress || 0) > 0) {
+        leaderCard.innerHTML = `
             <div class="leader-name">${esc(leader.username)}</div>
             <div class="leader-meta">Clasa ${esc(leader.grade)} · ${leader.acc || 0}% acc</div>
             <div class="leader-wpm">${leader.wpm || 0} <span style="font-size:0.8rem;color:var(--sub)">CPM</span></div>`;
     }
 }
 
+// ── Timer ─────────────────────────────────────────────────────────────────────
 function startRaceTimer() {
     stopRaceTimer();
     timerInterval = setInterval(() => {
         const elapsed = (Date.now() - raceStartTime) / 1000;
         const rem = Math.max(0, Math.round(raceDuration - elapsed));
-        const el = document.getElementById('race-timer');
-        el.textContent = rem;
-        el.classList.toggle('urgent', rem <= 5 && rem > 0);
+        const el  = document.getElementById('race-timer');
+        if (el) { el.textContent = rem; el.classList.toggle('urgent', rem <= 5 && rem > 0); }
         if (rem <= 0) stopRaceTimer();
     }, 250);
 }
@@ -460,29 +323,25 @@ function stopRaceTimer() {
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
 }
 
+// ── Results ───────────────────────────────────────────────────────────────────
 function renderResults() {
-    ['1-4', '5-9', '10-12'].forEach(grade => {
-        const list = players.filter(p => p.grade === grade)
-            .sort((a, b) => (b.wpm || 0) - (a.wpm || 0));
+    ['1-4','5-9','10-12'].forEach(grade => {
+        const list = players.filter(p => p.grade === grade).sort((a,b) => (b.wpm||0) - (a.wpm||0));
+        const rcEl  = document.getElementById(`rcount-${grade}`);
+        if (rcEl) rcEl.textContent = `${list.length} jucători`;
 
-        document.getElementById(`rcount-${grade}`).textContent = `${list.length} jucători`;
+        const podEl  = document.getElementById(`podium-${grade}`);
+        const restEl = document.getElementById(`rest-${grade}`);
+        if (!podEl) return;
 
-        const podiumEl = document.getElementById(`podium-${grade}`);
-        const restEl   = document.getElementById(`rest-${grade}`);
-
-        if (list.length === 0) {
-            podiumEl.innerHTML = '<div class="no-players-msg">Fără participanți</div>';
-            restEl.innerHTML = '';
-            return;
-        }
+        if (list.length === 0) { podEl.innerHTML = '<div class="no-players-msg">Fără participanți</div>'; if (restEl) restEl.innerHTML = ''; return; }
 
         const slots = [
             { p: list[1], rank: 2, icon: '🥈', cls: 'p2' },
             { p: list[0], rank: 1, icon: '👑', cls: 'p1' },
             { p: list[2], rank: 3, icon: '🥉', cls: 'p3' },
         ];
-
-        podiumEl.innerHTML = slots.map(s => s.p ? `
+        podEl.innerHTML = slots.map(s => s.p ? `
             <div class="podium-slot ${s.cls}">
                 <div class="podium-avatar">${s.icon}</div>
                 <div class="podium-uname">${esc(s.p.username)}</div>
@@ -492,14 +351,14 @@ function renderResults() {
                     <div class="podium-wpm-unit">CPM</div>
                     <div class="podium-acc-val">${s.p.acc || 0}% acc</div>
                 </div>
-            </div>` : `<div class="podium-slot"></div>`).join('');
+            </div>` : '<div class="podium-slot"></div>').join('');
 
-        restEl.innerHTML = list.slice(3).map((p, i) => `
-            <div class="rest-row" style="animation-delay:${i * 0.05}s">
-                <div class="rest-rank">${i + 4}</div>
+        if (restEl) restEl.innerHTML = list.slice(3).map((p,i) => `
+            <div class="rest-row" style="animation-delay:${i*0.05}s">
+                <div class="rest-rank">${i+4}</div>
                 <div class="rest-name">${esc(p.username)}</div>
-                <div class="rest-wpm">${p.wpm || 0}</div>
-                <div class="rest-acc">${p.acc || 0}%</div>
+                <div class="rest-wpm">${p.wpm||0}</div>
+                <div class="rest-acc">${p.acc||0}%</div>
             </div>`).join('');
     });
 
@@ -507,15 +366,98 @@ function renderResults() {
         confettiTriggered = true;
         const end = Date.now() + 3500;
         (function burst() {
-            confetti({ particleCount: 4, angle: 60,  spread: 55, origin: { x: 0 }, colors: ['#e2b714','#fff','#f5c842'] });
-            confetti({ particleCount: 4, angle: 120, spread: 55, origin: { x: 1 }, colors: ['#e2b714','#fff','#b0b8c8'] });
+            confetti({ particleCount:4, angle:60,  spread:55, origin:{x:0}, colors:['#e2b714','#fff','#f5c842'] });
+            confetti({ particleCount:4, angle:120, spread:55, origin:{x:1}, colors:['#e2b714','#fff','#b0b8c8'] });
             if (Date.now() < end) requestAnimationFrame(burst);
         })();
     }
 }
 
+// ── Countdown ─────────────────────────────────────────────────────────────────
+function runCountdown(startNum) {
+    if (cdInterval) clearInterval(cdInterval);
+    showScreen('countdown-screen');
+    let n = startNum || 3;
+    const numEl = document.getElementById('cd-number');
+    const lblEl = document.getElementById('cd-label');
+    if (numEl) numEl.textContent = n;
+    if (lblEl) lblEl.textContent = 'Pregătește-te!';
+    cdInterval = setInterval(() => {
+        n--;
+        if (n > 0) {
+            const el = document.getElementById('cd-number');
+            if (el) { const clone = el.cloneNode(true); clone.textContent = n; el.parentNode.replaceChild(clone, el); }
+        } else {
+            clearInterval(cdInterval); cdInterval = null;
+            const el = document.getElementById('cd-number');
+            const lb = document.getElementById('cd-label');
+            if (el) el.textContent = '🏁';
+            if (lb) lb.textContent = 'START!';
+        }
+    }, 1000);
+}
+
+// ── Camera PiP ────────────────────────────────────────────────────────────────
+function startCamView(schoolId, camId, camKey) {
+    closeCamView();
+    camViewerId = 'pres-view-' + Math.random().toString(36).substr(2, 6);
+
+    camPc = new RTCPeerConnection({
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302'  },
+            { urls: 'stun:stun1.l.google.com:19302' },
+        ],
+    });
+
+    camPc.ontrack = e => {
+        const pip = getOrCreatePip();
+        if (pip && e.streams[0]) { pip.srcObject = e.streams[0]; pip.style.display = 'block'; pip.play().catch(()=>{}); }
+    };
+
+    camPc.onicecandidate = e => {
+        if (e.candidate && ws?.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({ type: 'STREAM_ICE', candidate: e.candidate, viewerId: camViewerId }));
+    };
+
+    camPc.onconnectionstatechange = () => {
+        if (camPc && (camPc.connectionState === 'failed' || camPc.connectionState === 'disconnected')) closeCamView();
+    };
+
+    if (ws?.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'PRESENTATION_SET_CAM', schoolId, camId, camKey, viewerId: camViewerId }));
+}
+
+async function answerCamOffer(sdp, viewerId) {
+    if (!camPc) return;
+    try {
+        await camPc.setRemoteDescription({ type: 'offer', sdp });
+        const answer = await camPc.createAnswer();
+        await camPc.setLocalDescription(answer);
+        if (ws?.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({ type: 'STREAM_ANSWER', sdp: answer.sdp, viewerId: viewerId || camViewerId }));
+    } catch (_) {}
+}
+
+function closeCamView() {
+    if (camPc) { try { camPc.close(); } catch (_) {} camPc = null; }
+    const pip = document.getElementById('cam-pip');
+    if (pip) { pip.srcObject = null; pip.style.display = 'none'; }
+    camViewerId = null;
+}
+
+function getOrCreatePip() {
+    let pip = document.getElementById('cam-pip');
+    if (!pip) {
+        pip = document.createElement('video');
+        pip.id = 'cam-pip'; pip.autoplay = true; pip.muted = true; pip.playsInline = true;
+        pip.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;width:320px;border-radius:10px;box-shadow:0 4px 32px rgba(0,0,0,0.8);border:2px solid rgba(226,183,20,0.5);z-index:9998;background:#000;aspect-ratio:16/9;object-fit:cover;display:none;';
+        document.body.appendChild(pip);
+    }
+    return pip;
+}
+
 function esc(s) {
-    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 connect();

@@ -217,3 +217,123 @@
         .rest-wpm { color: var(--gold); font-family: 'DM Mono', monospace; font-size: 0.78rem; }
         .rest-acc { color: var(--sub); font-size: 0.7rem; }
         .no-players-msg { text-align: center; color: var(--sub); font-size: 0.8rem; letter-spacing: 2px; padding: 2.5rem; text-transform: uppercase; }
+
+        /* ══════════════════════════════════
+           ROBOTO MONO — match project style
+        ══════════════════════════════════ */
+        @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&display=swap');
+
+        /* Override Inter with Roboto Mono for consistency with the rest of the project */
+        body {
+            font-family: 'Roboto Mono', monospace !important;
+        }
+        /* Keep Bebas Neue only for large display numbers */
+        .stat-num, .cd-num, .race-timer-val, .race-rank,
+        .header-logo, .result-cat-title, .podium-rank-lbl,
+        .podium-wpm-val, .race-wpm-val, .leader-name,
+        .mini-stat-num, .grade-col-title {
+            font-family: 'Roboto Mono', monospace !important;
+            letter-spacing: 0.03em;
+        }
+        /* Mode badge variant for spell mode */
+        .header-badge.mode-spell {
+            border-color: rgba(226,183,20,0.5);
+            color: var(--gold);
+        }
+
+        /* ══════════════════════════════════
+           SPELLING BEE LOBBY LIST
+        ══════════════════════════════════ */
+        .lobby-spell-list {
+            flex: 1;
+            display: flex;
+            flex-wrap: wrap;
+            align-content: flex-start;
+            gap: 0.6rem;
+            padding: 1.25rem;
+            overflow-y: auto;
+        }
+        .spell-lobby-card {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 16px;
+            border-radius: 10px;
+            background: var(--edge);
+            border: 1px solid transparent;
+            animation: rowIn 0.3s cubic-bezier(0.23,1,0.32,1);
+            min-width: 180px;
+        }
+        .spell-card-name {
+            font-weight: 700;
+            font-size: 0.88rem;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .spell-card-grade {
+            font-size: 0.62rem;
+            padding: 2px 7px;
+            border-radius: 4px;
+            background: rgba(226,183,20,0.1);
+            color: var(--gold);
+            letter-spacing: 1px;
+        }
+        .spell-card-done {
+            font-size: 0.72rem;
+            color: var(--green);
+            font-weight: 700;
+        }
+        .grade-empty {
+            text-align: center;
+            color: var(--sub);
+            padding: 2rem;
+            font-size: 0.8rem;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        /* ══════════════════════════════════
+           SPELL ACTIVE SCREEN
+        ══════════════════════════════════ */
+        #spell-active-screen { background: var(--bg); }
+        .spell-body {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 200px 1fr;
+            overflow: hidden;
+        }
+        .spell-grid-area {
+            padding: 1.25rem 1.75rem;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        .spell-grid-label {
+            font-size: 0.62rem;
+            letter-spacing: 3px;
+            color: var(--sub);
+            text-transform: uppercase;
+        }
+        .spell-status-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .spell-status-chip {
+            padding: 8px 14px;
+            border-radius: 8px;
+            background: var(--panel);
+            border: 1px solid var(--edge);
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--sub);
+            transition: all 0.3s;
+        }
+        .spell-status-chip.done {
+            background: rgba(34,197,94,0.08);
+            border-color: rgba(34,197,94,0.35);
+            color: var(--text);
+        }

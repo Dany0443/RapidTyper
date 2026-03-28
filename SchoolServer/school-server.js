@@ -1,17 +1,17 @@
 /**
  * ╔══════════════════════════════════════════════════════════════════════╗
- * ║  RapidTyper — SchoolServer  v2                                      ║
- * ║                                                                     ║
- * ║  Runs on a school laptop that hotspots its own Wi-Fi.               ║
- * ║                                                                     ║
- * ║  • Serves game clients (index.html, spell.html) locally on :8080    ║
- * ║  • Accepts 8 phone cameras via WebRTC signaling on :5889            ║
- * ║  • Accepts raw MediaRecorder binary chunks on :5890                 ║
- * ║  • Records each camera stream to WebM file on disk                  ║
- * ║  • Transcodes to H.265 MP4 via ffmpeg after recording stops        ║
- * ║  • Generates JPEG thumbnails (2fps) and relays to MainServer        ║
- * ║  • Proxies all game WS traffic to MainServer via Tailscale          ║
- * ║  • Routes WebRTC signaling for remote live viewing                  ║
+ * ║  RapidTyper — SchoolServer  v2                                       ║
+ * ║                                                                      ║
+ * ║  Runs on a school laptop that hotspots its own Wi-Fi.                ║
+ * ║                                                                      ║
+ * ║  • Serves game clients (index.html, spell.html) locally on :8080     ║
+ * ║  • Accepts 8 phone cameras via WebRTC signaling on :5889             ║
+ * ║  • Accepts raw MediaRecorder binary chunks on :5890                  ║
+ * ║  • Records each camera stream to WebM file on disk                   ║
+ * ║  • Transcodes to H.265 MP4 via ffmpeg after recording stops          ║
+ * ║  • Generates JPEG thumbnails (2fps) and relays to MainServer         ║
+ * ║  • Proxies all game WS traffic to MainServer via Tailscale           ║
+ * ║  • Routes WebRTC signaling for remote live viewing                   ║
  * ╚══════════════════════════════════════════════════════════════════════╝
  *
  * ENV (.env file or environment variables):
@@ -31,11 +31,39 @@
 
 require('dotenv').config();
 
-const WebSocket = require('ws');
-const http      = require('http');
+const WebSocket   = require('ws');
+const http        = require('http');
+const https       = require('https');
+const { execSync, spawnSync } = require('child_process');
 const fs        = require('fs');
 const path      = require('path');
 const { spawn } = require('child_process');
+
+// Shared static file middleware
+let serveStatic;
+try {
+    ({ serveStatic } = require('../shared-static'));
+} catch (_) {
+    try { ({ serveStatic } = require('./shared-static')); }
+    catch (_) { serveStatic = () => false; }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  LOGGING (Modified to ensure console output)
+// ══════════════════════════════════════════════════════════════════════════
+const ts   = ()  => new Date().toISOString().substr(11, 12);
+const log  = msg => {
+    const out = `[${ts()}] [INFO]  ${msg}`;
+    console.log(out); 
+};
+const warn = msg => {
+    const out = `[${ts()}] [WARN]  ${msg}`;
+    console.warn(out);
+};
+const err  = msg => {
+    const out = `[${ts()}] [ERROR] ${msg}`;
+    console.error(out);
+};
 
 // ══════════════════════════════════════════════════════════════════════════
 //  CONFIG
@@ -45,28 +73,81 @@ const CFG = {
     schoolId      : process.env.SCHOOL_ID       || ('school-' + Math.random().toString(36).substr(2, 6)),
     streamKey     : process.env.STREAM_KEY      || 'stream1234',
     adminKey      : process.env.ADMIN_KEY       || '1313',
-    localPort     : parseInt(process.env.LOCAL_PORT)  || 5889,
+    localPort     : parseInt(process.env.SCHOOL_PORT)  || 5889,
     httpPort      : parseInt(process.env.HTTP_PORT)   || 8080,
     videoPort     : parseInt(process.env.VIDEO_PORT)  || 5890,
     maxCams       : parseInt(process.env.MAX_CAMS)    || 8,
     recordingsDir : process.env.RECORDINGS_DIR  || path.join(__dirname, 'recordings'),
-    staticRoot    : process.env.STATIC_ROOT     || path.join(__dirname, '..', 'ClientWeb'),
+    staticRoot    : path.isAbsolute(process.env.STATIC_ROOT || '')
+                        ? (process.env.STATIC_ROOT || path.join(__dirname, '..', 'ClientWeb'))
+                        : path.resolve(__dirname, process.env.STATIC_ROOT || '../ClientWeb'),
     ffmpegPath    : process.env.FFMPEG_PATH     || 'ffmpeg',
     thumbWidth    : 320,
     thumbFps      : 2,
+    httpsPort     : parseInt(process.env.HTTPS_PORT) || 8443,
+    certDir       : process.env.CERT_DIR  || path.join(__dirname, 'certs'),
 };
 
 if (!fs.existsSync(CFG.recordingsDir)) {
     fs.mkdirSync(CFG.recordingsDir, { recursive: true });
 }
+// ══════════════════════════════════════════════════════════════════════════
+//  TLS CERTIFICATE  (auto-generated self-signed, one-time)
+//  Phones must open the stream page over HTTPS because browsers block
+//  getUserMedia on plain HTTP.  We generate a cert once on first run and
+//  reuse it every time after.  Phones see a "Not private" warning on the
+//  very first visit — they tap  Advanced → Proceed  and the camera works.
+// ══════════════════════════════════════════════════════════════════════════
+if (!fs.existsSync(CFG.certDir)) fs.mkdirSync(CFG.certDir, { recursive: true });
 
-// ══════════════════════════════════════════════════════════════════════════
-//  LOGGING
-// ══════════════════════════════════════════════════════════════════════════
-const ts   = ()  => new Date().toISOString().substr(11, 12);
-const log  = msg => console.log(`[${ts()}] [INFO]  ${msg}`);
-const warn = msg => console.warn(`[${ts()}] [WARN]  ${msg}`);
-const err  = msg => console.error(`[${ts()}] [ERROR] ${msg}`);
+const CERT_KEY = path.join(CFG.certDir, 'server.key');
+const CERT_CRT = path.join(CFG.certDir, 'server.crt');
+
+function getLocalIp() {
+    try {
+        const nets = require('os').networkInterfaces();
+        for (const name of Object.keys(nets)) {
+            for (const iface of nets[name]) {
+                if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+            }
+        }
+    } catch (_) {}
+    return '0.0.0.0';
+}
+
+function ensureCert() {
+    if (fs.existsSync(CERT_KEY) && fs.existsSync(CERT_CRT)) {
+        console.log('🔐 TLS cert found — HTTPS will be available');
+        return true;
+    }
+    console.log('🔐 Generating self-signed TLS certificate (runs once)...');
+    const ip  = getLocalIp();
+    const ext = path.join(CFG.certDir, 'v3.ext');
+    fs.writeFileSync(ext, [
+        '[req]\nreq_extensions=v3_req\ndistinguished_name=dn\nprompt=no',
+        '[dn]\nCN=rapidtyper.local',
+        '[v3_req]\nsubjectAltName=@alt',
+        '[alt]',
+        `IP.1=${ip}`,
+        'IP.2=127.0.0.1',
+        'DNS.1=localhost',
+    ].join('\n'));
+    const r = spawnSync('openssl', [
+        'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+        '-keyout', CERT_KEY, '-out', CERT_CRT,
+        '-days', '3650', '-subj', '/CN=rapidtyper.local/O=RapidTyper',
+        '-extensions', 'v3_req', '-config', ext,
+    ], { stdio: 'pipe' });
+    if (r.status !== 0) {
+        warn('openssl failed — no HTTPS. Install openssl and restart.');
+        warn('  sudo apt install openssl && node school-server.js');
+        return false;
+    }
+    console.log(`✅ Certificate written to ${CFG.certDir}`);
+    return true;
+}
+
+const TLS_OK = ensureCert();
 
 // ══════════════════════════════════════════════════════════════════════════
 //  CAMERA REGISTRY
@@ -183,10 +264,36 @@ function handleMainMessage(msg) {
             stopRecording(msg.camId);
             break;
 
-        // All other messages → broadcast to local game clients
-        default:
-            broadcastToLocalClients(JSON.stringify(msg));
+        // All other messages from MainServer → route to the right local client(s)
+        default: {
+            // If the message carries a _lcid, it's a targeted reply to one specific client
+            // (e.g. JOIN_SUCCESS, GAME_IN_PROGRESS, AUTH_SUCCESS, USERNAME_CHANGED)
+            if (msg._lcid) {
+                const targetWs = lcidToWs.get(msg._lcid);
+                // Strip routing metadata before forwarding
+                const { _lcid, _schoolId, _schoolProxy, ...clean } = msg;
+                const data = JSON.stringify(clean);
+                if (targetWs?.readyState === WebSocket.OPEN) {
+                    try { targetWs.send(data); } catch (_) {}
+                }
+                // Some targeted replies are also useful to broadcast (e.g. USERNAME_CHANGED
+                // must reach the client, but UPDATE_LOBBY should reach everyone)
+                const alsobroadcast = new Set([
+                    'UPDATE_LOBBY', 'START_GAME', 'GAME_OVER', 'COUNTDOWN',
+                    'FORCE_RESET', 'SERIES_COMPLETE', 'SERIES_OVER', 'SERVER_SHUTDOWN',
+                    'UPDATE_SPELLERS', 'SPELL_START', 'SPELL_END', 'MODE_CHANGED',
+                    'SYNC_STATE', 'TIME_SYNC', 'FULL_STATE_SYNC',
+                ]);
+                if (alsobroadcast.has(clean.type)) {
+                    broadcastToLocalClients(data);
+                }
+            } else {
+                // No _lcid → broadcast to all local clients
+                const { _schoolId, _schoolProxy, ...clean } = msg;
+                broadcastToLocalClients(JSON.stringify(clean));
+            }
             break;
+        }
     }
 }
 
@@ -492,7 +599,13 @@ log(`📽️  Video WS server on :${CFG.videoPort}`);
 //  All players, spellers, host, and presentation screens connect here.
 //  Camera phones also connect here for WebRTC signaling (stream.js).
 // ══════════════════════════════════════════════════════════════════════════
-const gameWss = new WebSocket.Server({ port: CFG.localPort });
+// Game WS runs on its own TCP port for plain WS, and is also attached to the
+// HTTPS server (above) for wss:// connections from phones on HTTPS.
+const gameWss      = new WebSocket.Server({ noServer: true });
+const _gameWsHttp  = http.createServer();
+const _gameWsPlain = new WebSocket.Server({ server: _gameWsHttp });
+_gameWsPlain.on('connection', (ws, req) => gameWss.emit('connection', ws, req));
+_gameWsHttp.listen(CFG.localPort, '0.0.0.0');
 
 gameWss.on('connection', (ws) => {
     ws.isAlive = true;
@@ -513,7 +626,7 @@ gameWss.on('connection', (ws) => {
 
         // Regular game client → track role, forward to MainServer
         trackClientRole(ws, msg);
-        proxyToMain(msg);
+        proxyToMain(ws, msg);
     });
 
     ws.on('close', () => {
@@ -535,6 +648,7 @@ gameWss.on('connection', (ws) => {
 
         const client = localClients.get(ws);
         localClients.delete(ws);
+        if (ws._lcid) lcidToWs.delete(ws._lcid);
         if (client?.userId && mainConnected) {
             safeSendMain({
                 type    : 'SCHOOL_CLIENT_DISCONNECT',
@@ -554,7 +668,7 @@ setInterval(() => {
     });
 }, 30000);
 
-log(`🎮 Game WS server on :${CFG.localPort}`);
+log(`🎮 Game WS  :${CFG.localPort}  (plain) + attached to HTTPS :${CFG.httpsPort || 8443} (secure)`);
 
 function handleGamePortAuth(ws, msg) {
     if (msg.key !== CFG.streamKey) {
@@ -695,6 +809,18 @@ function handleVideoChunk(camId, cam, chunk) {
 
 // ── Client role tracking ───────────────────────────────────────────────────
 
+// Assign a stable local-client ID to every game-port WS on first use.
+// This ID travels with every proxied message so server.js can maintain
+// per-player virtual state even though all school clients share one upstream WS.
+let _lcidCounter = 0;
+function getLcid(ws) {
+    if (!ws._lcid) ws._lcid = CFG.schoolId + '::lc' + (++_lcidCounter);
+    return ws._lcid;
+}
+
+// lcid → local ws (for routing targeted replies from server.js back to the right client)
+const lcidToWs = new Map();
+
 function trackClientRole(ws, msg) {
     if (!localClients.has(ws)) localClients.set(ws, {});
     const client = localClients.get(ws);
@@ -702,11 +828,16 @@ function trackClientRole(ws, msg) {
     else if (msg.type === 'JOIN_SPELL')                       { client.role = 'speller'; client.userId = msg.userId; }
     else if (msg.type === 'ADMIN_LOGIN')                      { client.role = 'admin';   }
     else if (msg.type === 'PRESENTATION_JOIN')                { client.role = 'viewer';  }
+    // Always register lcid → ws so targeted replies can reach this client
+    lcidToWs.set(getLcid(ws), ws);
 }
 
-function proxyToMain(msg) {
+function proxyToMain(ws, msg) {
+    // Tag every proxied message with school ID + per-client ID.
+    // server.js uses _lcid to demux replies back to the right local WS.
     msg._schoolId    = CFG.schoolId;
     msg._schoolProxy = true;
+    msg._lcid        = getLcid(ws);
     safeSendMain(msg);
 }
 
@@ -726,8 +857,16 @@ const MIME = {
     '.mp4'  : 'video/mp4',
 };
 
-const httpServer = http.createServer((req, res) => {
+// ── Shared request handler (used by both HTTP and HTTPS servers) ────────────
+function handleRequest(req, res) {
     const setCors = () => res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // /stream on plain HTTP → redirect to HTTPS so camera works on phones
+    if (TLS_OK && (req.url === '/stream' || req.url.startsWith('/stream?'))) {
+        const ip   = (req.headers.host || '').split(':')[0] || getLocalIp();
+        res.writeHead(302, { Location: `https://${ip}:${CFG.httpsPort}${req.url}` });
+        return res.end();
+    }
 
     if (req.url === '/health') {
         setCors();
@@ -774,23 +913,42 @@ const httpServer = http.createServer((req, res) => {
         return;
     }
 
-    // Static files
-    const urlPath  = req.url.split('?')[0];
-    const filePath = path.join(CFG.staticRoot, urlPath === '/' ? 'index.html' : urlPath);
-    fs.readFile(filePath, (e, data) => {
-        if (e) { res.writeHead(404); res.end('Not found'); return; }
-        const ext = path.extname(filePath).toLowerCase();
-        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-        res.end(data);
-    });
+    // Static files — shared-static handles path resolution + WS URL patching
+    const handled = serveStatic(CFG.staticRoot, req, res, { patchJs: true });
+    if (!handled) { res.writeHead(404); res.end('Not found'); }
+}
+
+// ── HTTP server :8080 ─────────────────────────────────────────────────────────
+const httpServer = http.createServer(handleRequest);
+httpServer.listen(CFG.httpPort, '0.0.0.0', () => {
+    log(`🌐 HTTP  :${CFG.httpPort}  (static files + recordings)`);
+    if (TLS_OK) log(`   /stream auto-redirects → https://<ip>:${CFG.httpsPort}/stream`);
 });
 
-httpServer.listen(CFG.httpPort, '0.0.0.0', () => {
-    log(`🌐 HTTP on :${CFG.httpPort}  (static files + recordings)`);
-    log(`   GET /health           → server status`);
-    log(`   GET /recordings       → list recordings (JSON)`);
-    log(`   GET /recordings/:file → download recording`);
-});
+// ── HTTPS server :8443 ───────────────────────────────────────────────────────
+// Camera phones MUST use this — getUserMedia is blocked on plain HTTP.
+// WSS (secure WebSocket) is handled here too via the 'upgrade' event,
+// so wss://<ip>:8443 works without an extra port.
+if (TLS_OK) {
+    try {
+        const tlsOpts = { key: fs.readFileSync(CERT_KEY), cert: fs.readFileSync(CERT_CRT) };
+        const httpsServer = https.createServer(tlsOpts, handleRequest);
+
+        // Attach the game WS server to this HTTPS server so wss:// works on port 8443
+        httpsServer.on('upgrade', (req, socket, head) => {
+            gameWss.handleUpgrade(req, socket, head, ws => gameWss.emit('connection', ws, req));
+        });
+
+        httpsServer.listen(CFG.httpsPort, '0.0.0.0', () => {
+            const ip = getLocalIp();
+            log(`🔒 HTTPS :${CFG.httpsPort}  (cameras — getUserMedia requires this)`);
+            log(`   📱 Phone URL: https://${ip}:${CFG.httpsPort}/stream`);
+            log(`   ⚠  First visit: tap  Advanced → Proceed  in Chrome (once per phone)`);
+        });
+    } catch (e) {
+        warn(`HTTPS server failed to start: ${e.message}`);
+    }
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 //  GRACEFUL SHUTDOWN

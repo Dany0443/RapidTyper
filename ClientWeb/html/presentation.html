@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>FastTyper — Live Board</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Roboto+Mono:wght@400;500;700&family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <link rel="stylesheet" href="../css/presentation.css"></link>
@@ -30,7 +30,7 @@
     <div id="lobby-screen" class="screen">
         <div class="board-header">
             <div class="header-logo">Fast<span>Typer</span></div>
-            <div class="header-badge">Sala de Așteptare</div>
+            <div class="header-badge" id="lobby-mode-badge">⌨  FAST TYPER</div>
             <div id="lobby-round-badge" class="round-badge" style="display:none"></div>
             <div class="header-right">
                 <div class="conn-status"></div>
@@ -41,7 +41,7 @@
             <div class="lobby-sidebar">
                 <div>
                     <div class="stat-num" id="lobby-count">0</div>
-                    <div class="stat-lbl">Jucători</div>
+                    <div class="stat-lbl">Conectați</div>
                 </div>
                 <div class="sidebar-div"></div>
                 <div class="waiting-text">Așteptăm<br>startul</div>
@@ -49,6 +49,7 @@
                     <div class="conn-dot"></div><div class="conn-dot"></div><div class="conn-dot"></div>
                 </div>
             </div>
+            <!-- Fast typer grade columns -->
             <div class="lobby-grades">
                 <div class="grade-col">
                     <div class="grade-col-header">
@@ -71,6 +72,40 @@
                     </div>
                     <div id="list-10-12" class="grade-players"></div>
                 </div>
+            </div>
+            <!-- Spelling bee speller list (toggled by JS) -->
+            <div id="lobby-spell-list" class="lobby-spell-list" style="display:none"></div>
+        </div>
+    </div>
+
+    <!-- SPELL ACTIVE -->
+    <div id="spell-active-screen" class="screen">
+        <div class="board-header">
+            <div class="header-logo">Spelling<span>Bee</span></div>
+            <div class="header-badge live">🐝 DICTARE ACTIVĂ</div>
+            <div id="spell-round-badge" class="round-badge" style="display:none"></div>
+            <div class="header-right"><div class="conn-status"></div></div>
+        </div>
+        <div class="spell-body">
+            <div class="lobby-sidebar">
+                <div>
+                    <div class="stat-num" id="spell-submitted-count" style="color:var(--green)">0</div>
+                    <div class="stat-lbl">Trimis</div>
+                </div>
+                <div class="sidebar-div"></div>
+                <div>
+                    <div class="stat-num" id="spell-total-count">0</div>
+                    <div class="stat-lbl">Speleri</div>
+                </div>
+                <div class="sidebar-div"></div>
+                <div class="waiting-text">Dictare<br>live</div>
+                <div class="conn-dots">
+                    <div class="conn-dot"></div><div class="conn-dot"></div><div class="conn-dot"></div>
+                </div>
+            </div>
+            <div class="spell-grid-area">
+                <div class="spell-grid-label">Status speleri</div>
+                <div id="spell-status-grid" class="spell-status-grid"></div>
             </div>
         </div>
     </div>
