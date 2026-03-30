@@ -1,34 +1,5 @@
-/**
- * RapidTyper — MainServer
- * ──────────────────────────────────────────────────────────────────────────
- * NODE_ENV=development  (or DEV=true in .env)
- *   • Serves ClientWeb static files on :5890 with WS URL auto-patching
- *   • Embeds a virtual SchoolNode — no separate school-server process needed
- *   • 2 virtual cameras auto-start with animated SVG preview thumbnails
- *   • Console: cam add <id> [label] | cam list | cam stop <id>
- *   • HTTP:    POST /dev/cam/start   DELETE /dev/cam/:id   GET /dev/cam/list
- *
- * NODE_ENV=production  (default)
- *   • WS on :5889 only, health+stats on :5890
- *   • Static files served by nginx/caddy pointing at ClientWeb/
- *   • School nodes connect from their laptops via Tailscale WS
- *
- * School proxy protocol
- * ──────────────────────────────────────────────────────────────────────────
- * When school-server.js proxies a local client's message it tags it with:
- *   _schoolProxy: true
- *   _schoolId:    "school-cluj-01"
- *   _lcid:        "school-cluj-01::lc42"   ← stable per-client ID
- *
- * server.js creates a lightweight VirtualClient object per _lcid and stores
- * player state against it, exactly as if it were a real WS connection.
- * Replies to that player are tagged with _lcid and sent back to the school
- * node, which routes them to the correct local WS via lcidToWs.
- */
 
 'use strict';
-
-require('dotenv').config();
 
 const WebSocket  = require('ws');
 const sqlite3    = require('sqlite3').verbose();
@@ -49,12 +20,11 @@ try {
 // ══════════════════════════════════════════════════════════════════════════
 //  MODE + CONFIG
 // ══════════════════════════════════════════════════════════════════════════
-const IS_DEV = process.env.NODE_ENV === 'development' || process.env.DEV === 'true';
+const CFG = require('../shared/config');
+const Logger = require('../shared/logger');
+const IS_DEV = CFG.IS_DEV;
 
-const CLIENT_WEB = path.resolve(
-    __dirname,
-    process.env.STATIC_ROOT || path.join('..', 'ClientWeb')
-);
+const CLIENT_WEB = CFG.STATIC_ROOT;
 
 if (IS_DEV) {
     console.log('\n╔══════════════════════════════════════════════════════════╗');
@@ -67,10 +37,10 @@ if (IS_DEV) {
 }
 
 let DEBUG_MODE   = false;
-const ADMIN_KEY  = process.env.ADMIN_KEY  || '1313';
-const STREAM_KEY = process.env.STREAM_KEY || 'stream1234';
-let   GAME_DURATION = 60;
-const MAX_PLAYERS   = 200;
+const ADMIN_KEY  = CFG.ADMIN_KEY;
+const STREAM_KEY = CFG.STREAM_KEY;
+let   GAME_DURATION = CFG.GAME_DURATION;
+const MAX_PLAYERS   = CFG.MAX_PLAYERS;
 
 function debugLog(msg) { if (DEBUG_MODE) console.log(`[DEBUG] ${msg}`); }
 
@@ -154,27 +124,7 @@ function getOrCreateVirtualClient(lcid, nodeWs, schoolId) {
 // ══════════════════════════════════════════════════════════════════════════
 //  LOGGER
 // ══════════════════════════════════════════════════════════════════════════
-const LOG_MAX = 5 * 1024 * 1024;
-class Logger {
-    constructor() {
-        this.lf = FILES.mainLog; this.ef = FILES.errorLog;
-        [this.lf, this.ef].forEach(f => { if (!fs.existsSync(f)) fs.writeFileSync(f, ''); });
-    }
-    rotate(p) {
-        try { if (fs.statSync(p).size > LOG_MAX) { fs.renameSync(p, p.replace(/\.log$/, `.${Date.now()}.log`)); fs.writeFileSync(p, ''); } } catch (_) {}
-    }
-    log(msg, lvl = 'INFO') {
-        const line = `[${new Date().toISOString()}] [${lvl}] ${msg}`;
-        console.log(line);
-        this.rotate(this.lf);
-        fs.appendFile(this.lf, line + '\n', () => {});
-        if (lvl === 'ERROR') { this.rotate(this.ef); fs.appendFile(this.ef, line + '\n', () => {}); }
-    }
-    info(m)  { this.log(m, 'INFO');  }
-    warn(m)  { this.log(m, 'WARN');  }
-    error(m) { this.log(m, 'ERROR'); }
-}
-const logger = new Logger();
+const logger = new Logger(DIRS.logs);
 function sysLog(m) { logger.info(m); }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -955,14 +905,15 @@ async function handleMessage(ws, data) {
             const sp = gameState.state.players.get(ws);
             if (sp?.role !== 'streamer') break;
             const camKey = ws._camKey || `direct::${data.camId || sp.camId}`;
+            const camId = data.camId || sp.camId;
             allCameras.set(camKey, {
-                camId: data.camId || sp.camId, schoolId: 'direct',
-                label: data.label || data.camId || sp.camId,
+                camId, schoolId: 'direct',
+                label: data.label || camId,
                 streaming: true, recording: false, bytesWritten: 0,
                 key: camKey, lastSeen: Date.now()
             });
             broadcast({ type: 'CAMERAS_UPDATE', cameras: getCamerasSummary() });
-            sysLog(`📡 Stream started: ${data.camId}`);
+            sysLog(`� Camera "${camId}" is now LIVE (direct connection)`);
             // Notify any presentation screens that a stream is available
             for (const [pws, pp] of gameState.state.players) {
                 if (pp.role === 'viewer' && pws._viewingCam === camKey) {
@@ -1320,32 +1271,32 @@ const httpServer = http.createServer(async (req, res) => {
         return;
     }
 
-    if (!IS_DEV) { res.writeHead(404); res.end('Not found'); return; }
-
     // ── Dev-only ───────────────────────────────────────────────────────────
-    if (url === '/dev/cam/list') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ schoolId: DEV_SCHOOL_ID, cams: getCamerasSummary() }, null, 2));
-    }
+    if (IS_DEV) {
+        if (url === '/dev/cam/list') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ schoolId: DEV_SCHOOL_ID, cams: getCamerasSummary() }, null, 2));
+        }
 
-    if (url === '/dev/cam/start' && req.method === 'POST') {
-        let body = ''; req.on('data', d => body += d);
-        req.on('end', () => {
-            try {
-                const { camId = 'cam-' + Date.now(), label } = JSON.parse(body || '{}');
-                const ok = startVirtualCamera(camId, label || camId);
-                res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok, camId, schoolId: DEV_SCHOOL_ID }));
-            } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
-        });
-        return;
-    }
+        if (url === '/dev/cam/start' && req.method === 'POST') {
+            let body = ''; req.on('data', d => body += d);
+            req.on('end', () => {
+                try {
+                    const { camId = 'cam-' + Date.now(), label } = JSON.parse(body || '{}');
+                    const ok = startVirtualCamera(camId, label || camId);
+                    res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok, camId, schoolId: DEV_SCHOOL_ID }));
+                } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+            });
+            return;
+        }
 
-    if (url.startsWith('/dev/cam/') && req.method === 'DELETE') {
-        const camId = url.replace('/dev/cam/', '');
-        stopVirtualCamera(camId);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: true, camId }));
+        if (url.startsWith('/dev/cam/') && req.method === 'DELETE') {
+            const camId = url.replace('/dev/cam/', '');
+            stopVirtualCamera(camId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: true, camId }));
+        }
     }
 
     // Proxy school server recordings list
@@ -1368,7 +1319,7 @@ const httpServer = http.createServer(async (req, res) => {
     }
 
     // Static ClientWeb files
-    const handled = serveStatic(CLIENT_WEB, req, res, { patchJs: true });
+    const handled = serveStatic(CLIENT_WEB, req, res);
     if (!handled) { res.writeHead(404); res.end('Not found'); }
 });
 

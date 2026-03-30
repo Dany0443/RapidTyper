@@ -1,4 +1,4 @@
-const WS_URL       = `ws://${location.hostname || 'localhost'}:5889`;
+const WS_URL       = window.__WS_URL__ || `ws://${location.hostname || 'localhost'}:5889`;
     const LS_SESSION   = 'mt_session';
     const LS_DRAFT     = 'mt_spell_draft_v2'; // new key — v2 stores JSON array
 

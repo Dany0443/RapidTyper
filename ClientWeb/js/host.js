@@ -1,4 +1,4 @@
-const WS_URL = `ws://${location.hostname || "localhost"}:5889`;
+const WS_URL = window.__WS_URL__ || `ws://${location.hostname || "localhost"}:5889`;
         const LS_HOST_SESSION = "mt_host_session";
 
         let ws;

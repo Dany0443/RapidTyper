@@ -1,7 +1,8 @@
+const CFG = require('../shared/config');
 const WebSocket = require('ws');
 
 // CONFIG
-const SERVER_URL = 'ws://localhost:5889'; // Make sure this matches your server path (e.g. /ws if needed)
+const SERVER_URL = CFG.MAIN_SERVER_WS; 
 const BOT_COUNT = 50;
 const UPDATE_INTERVAL_MS = 1000; // Bots send updates every 1 second
 

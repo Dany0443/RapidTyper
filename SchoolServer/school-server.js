@@ -29,8 +29,6 @@
 
 'use strict';
 
-require('dotenv').config();
-
 const WebSocket   = require('ws');
 const http        = require('http');
 const https       = require('https');
@@ -38,6 +36,7 @@ const { execSync, spawnSync } = require('child_process');
 const fs        = require('fs');
 const path      = require('path');
 const { spawn } = require('child_process');
+const readline  = require('readline');
 
 // Shared static file middleware
 let serveStatic;
@@ -48,44 +47,36 @@ try {
     catch (_) { serveStatic = () => false; }
 }
 
+const sharedConfig = require('../shared/config');
+const Logger = require('../shared/logger');
+
 // ══════════════════════════════════════════════════════════════════════════
-//  LOGGING (Modified to ensure console output)
+//  LOGGING
 // ══════════════════════════════════════════════════════════════════════════
-const ts   = ()  => new Date().toISOString().substr(11, 12);
-const log  = msg => {
-    const out = `[${ts()}] [INFO]  ${msg}`;
-    console.log(out); 
-};
-const warn = msg => {
-    const out = `[${ts()}] [WARN]  ${msg}`;
-    console.warn(out);
-};
-const err  = msg => {
-    const out = `[${ts()}] [ERROR] ${msg}`;
-    console.error(out);
-};
+const logger = new Logger(path.join(__dirname, 'logs'));
+const log  = msg => logger.info(msg);
+const warn = msg => logger.warn(msg);
+const err  = msg => logger.error(msg);
 
 // ══════════════════════════════════════════════════════════════════════════
 //  CONFIG
 // ══════════════════════════════════════════════════════════════════════════
 const CFG = {
-    mainServerWs  : process.env.MAIN_SERVER_WS  || 'ws://localhost:5889',
-    schoolId      : process.env.SCHOOL_ID       || ('school-' + Math.random().toString(36).substr(2, 6)),
-    streamKey     : process.env.STREAM_KEY      || 'stream1234',
-    adminKey      : process.env.ADMIN_KEY       || '1313',
-    localPort     : parseInt(process.env.SCHOOL_PORT)  || 5889,
-    httpPort      : parseInt(process.env.HTTP_PORT)   || 8080,
-    videoPort     : parseInt(process.env.VIDEO_PORT)  || 5890,
-    maxCams       : parseInt(process.env.MAX_CAMS)    || 8,
-    recordingsDir : process.env.RECORDINGS_DIR  || path.join(__dirname, 'recordings'),
-    staticRoot    : path.isAbsolute(process.env.STATIC_ROOT || '')
-                        ? (process.env.STATIC_ROOT || path.join(__dirname, '..', 'ClientWeb'))
-                        : path.resolve(__dirname, process.env.STATIC_ROOT || '../ClientWeb'),
-    ffmpegPath    : process.env.FFMPEG_PATH     || 'ffmpeg',
+    mainServerWs  : sharedConfig.MAIN_SERVER_WS,
+    schoolId      : sharedConfig.SCHOOL_ID,
+    streamKey     : sharedConfig.STREAM_KEY,
+    adminKey      : sharedConfig.ADMIN_KEY,
+    localPort     : sharedConfig.LOCAL_PORT,
+    httpPort      : sharedConfig.HTTP_PORT,
+    videoPort     : sharedConfig.VIDEO_PORT,
+    maxCams       : sharedConfig.MAX_CAMS,
+    recordingsDir : sharedConfig.RECORDINGS_DIR,
+    staticRoot    : sharedConfig.STATIC_ROOT,
+    ffmpegPath    : sharedConfig.FFMPEG_PATH,
     thumbWidth    : 320,
     thumbFps      : 2,
-    httpsPort     : parseInt(process.env.HTTPS_PORT) || 8443,
-    certDir       : process.env.CERT_DIR  || path.join(__dirname, 'certs'),
+    httpsPort     : sharedConfig.HTTPS_PORT,
+    certDir       : sharedConfig.CERT_DIR,
 };
 
 if (!fs.existsSync(CFG.recordingsDir)) {
@@ -117,37 +108,78 @@ function getLocalIp() {
 
 function ensureCert() {
     if (fs.existsSync(CERT_KEY) && fs.existsSync(CERT_CRT)) {
-        console.log('🔐 TLS cert found — HTTPS will be available');
-        return true;
+        const keyStat = fs.statSync(CERT_KEY);
+        const crtStat = fs.statSync(CERT_CRT);
+        if (keyStat.size > 0 && crtStat.size > 0) {
+            log('🔐 TLS cert found — HTTPS will be available');
+            return true;
+        }
+        warn('🔐 TLS cert files are empty — regenerating...');
     }
-    console.log('🔐 Generating self-signed TLS certificate (runs once)...');
+    
+    log('🔐 Generating self-signed TLS certificate (runs once)...');
     const ip  = getLocalIp();
     const ext = path.join(CFG.certDir, 'v3.ext');
-    fs.writeFileSync(ext, [
-        '[req]\nreq_extensions=v3_req\ndistinguished_name=dn\nprompt=no',
-        '[dn]\nCN=rapidtyper.local',
-        '[v3_req]\nsubjectAltName=@alt',
-        '[alt]',
-        `IP.1=${ip}`,
-        'IP.2=127.0.0.1',
-        'DNS.1=localhost',
-    ].join('\n'));
-    const r = spawnSync('openssl', [
-        'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-        '-keyout', CERT_KEY, '-out', CERT_CRT,
-        '-days', '3650', '-subj', '/CN=rapidtyper.local/O=RapidTyper',
-        '-extensions', 'v3_req', '-config', ext,
-    ], { stdio: 'pipe' });
-    if (r.status !== 0) {
-        warn('openssl failed — no HTTPS. Install openssl and restart.');
-        warn('  sudo apt install openssl && node school-server.js');
+    
+    try {
+        fs.writeFileSync(ext, [
+            '[req]\nreq_extensions=v3_req\ndistinguished_name=dn\nprompt=no',
+            '[dn]\nCN=rapidtyper.local',
+            '[v3_req]\nsubjectAltName=@alt',
+            '[alt]',
+            `IP.1=${ip}`,
+            'IP.2=127.0.0.1',
+            'DNS.1=localhost',
+        ].join('\n'));
+        
+        const openssl_paths = [
+            'openssl',
+            'C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe',
+            'C:\\Program Files (x86)\\OpenSSL-Win32\\bin\\openssl.exe',
+            '/usr/bin/openssl',
+            '/usr/local/bin/openssl'
+        ];
+        
+        let r = { status: -1 };
+        for (const p of openssl_paths) {
+            r = spawnSync(p, [
+                'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                '-keyout', CERT_KEY, '-out', CERT_CRT,
+                '-days', '3650', '-subj', '/CN=rapidtyper.local/O=RapidTyper',
+                '-extensions', 'v3_req', '-config', ext,
+            ], { stdio: 'pipe' });
+            if (r.status === 0) break;
+        }
+        
+        if (r.status !== 0) {
+            warn('❌ openssl failed — no HTTPS. Is openssl installed?');
+            warn('   Ensure openssl is in your PATH or installed at C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe');
+            return false;
+        }
+        
+        log(`✅ Certificate written to ${CFG.certDir}`);
+        return true;
+    } catch (e) {
+        err(`❌ Failed to generate certificate: ${e.message}`);
         return false;
     }
-    console.log(`✅ Certificate written to ${CFG.certDir}`);
-    return true;
 }
 
 const TLS_OK = ensureCert();
+
+function checkFfmpeg() {
+    try {
+        spawnSync(CFG.ffmpegPath, ['-version'], { stdio: 'ignore' });
+        return true;
+    } catch (_) {
+        warn(`FFMPEG NOT FOUND at "${CFG.ffmpegPath}"`);
+        warn('Recording and transcoding will fail. Please install ffmpeg.');
+        warn('  Windows: choco install ffmpeg');
+        warn('  Linux:   sudo apt install ffmpeg');
+        return false;
+    }
+}
+const FFMPEG_OK = checkFfmpeg();
 
 // ══════════════════════════════════════════════════════════════════════════
 //  CAMERA REGISTRY
@@ -595,17 +627,12 @@ setInterval(() => {
 log(`📽️  Video WS server on :${CFG.videoPort}`);
 
 // ══════════════════════════════════════════════════════════════════════════
-//  GAME PORT WS SERVER  :5889
+//  GAME PORT WS SERVER
 //  All players, spellers, host, and presentation screens connect here.
 //  Camera phones also connect here for WebRTC signaling (stream.js).
 // ══════════════════════════════════════════════════════════════════════════
-// Game WS runs on its own TCP port for plain WS, and is also attached to the
-// HTTPS server (above) for wss:// connections from phones on HTTPS.
-const gameWss      = new WebSocket.Server({ noServer: true });
-const _gameWsHttp  = http.createServer();
-const _gameWsPlain = new WebSocket.Server({ server: _gameWsHttp });
-_gameWsPlain.on('connection', (ws, req) => gameWss.emit('connection', ws, req));
-_gameWsHttp.listen(CFG.localPort, '0.0.0.0');
+// Game WS runs via the 'upgrade' event on both HTTP and HTTPS servers.
+const gameWss = new WebSocket.Server({ noServer: true });
 
 gameWss.on('connection', (ws) => {
     ws.isAlive = true;
@@ -686,7 +713,7 @@ function handleGamePortAuth(ws, msg) {
     else          { cameras.set(camId, makeCamEntry(camId, ws, null, msg.label || camId)); }
 
     ws.send(JSON.stringify({ type: 'STREAM_AUTH_OK', camId }));
-    log(`📷 Game-port cam authed: ${camId}`);
+    log(`📷 Camera phone connected & authed: ${camId}`);
     notifyMainCameraState();
 }
 
@@ -860,9 +887,10 @@ const MIME = {
 // ── Shared request handler (used by both HTTP and HTTPS servers) ────────────
 function handleRequest(req, res) {
     const setCors = () => res.setHeader('Access-Control-Allow-Origin', '*');
+    const isHttps = !!req.socket.encrypted;
 
     // /stream on plain HTTP → redirect to HTTPS so camera works on phones
-    if (TLS_OK && (req.url === '/stream' || req.url.startsWith('/stream?'))) {
+    if (TLS_OK && !isHttps && (req.url === '/stream' || req.url.startsWith('/stream?'))) {
         const ip   = (req.headers.host || '').split(':')[0] || getLocalIp();
         res.writeHead(302, { Location: `https://${ip}:${CFG.httpsPort}${req.url}` });
         return res.end();
@@ -914,12 +942,19 @@ function handleRequest(req, res) {
     }
 
     // Static files — shared-static handles path resolution + WS URL patching
-    const handled = serveStatic(CFG.staticRoot, req, res, { patchJs: true });
+    const handled = serveStatic(CFG.staticRoot, req, res);
     if (!handled) { res.writeHead(404); res.end('Not found'); }
 }
 
 // ── HTTP server :8080 ─────────────────────────────────────────────────────────
 const httpServer = http.createServer(handleRequest);
+
+// Attach the game WS server to this HTTP server
+httpServer.on('upgrade', (req, socket, head) => {
+    // Only handle upgrades if it's not the video port (if they were the same)
+    gameWss.handleUpgrade(req, socket, head, ws => gameWss.emit('connection', ws, req));
+});
+
 httpServer.listen(CFG.httpPort, '0.0.0.0', () => {
     log(`🌐 HTTP  :${CFG.httpPort}  (static files + recordings)`);
     if (TLS_OK) log(`   /stream auto-redirects → https://<ip>:${CFG.httpsPort}/stream`);
@@ -951,14 +986,40 @@ if (TLS_OK) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+//  CONSOLE COMMANDS
+// ══════════════════════════════════════════════════════════════════════════
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+rl.on('line', async line => {
+    const cmd = line.trim().toLowerCase();
+    if (cmd === 'stop') await shutdown('CONSOLE');
+    if (cmd === 'status') {
+        console.log('\n=== SCHOOL STATUS ===');
+        console.log(`School ID:   ${CFG.schoolId}`);
+        console.log(`Main connected: ${mainConnected ? 'YES' : 'NO'}`);
+        console.log(`Local clients:  ${localClients.size}`);
+        console.log(`Cameras:        ${cameras.size}`);
+        console.log(`Uptime:         ${Math.floor(process.uptime() / 60)} minutes`);
+        console.log('====================\n');
+    }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
 //  GRACEFUL SHUTDOWN
 // ══════════════════════════════════════════════════════════════════════════
 async function shutdown(signal) {
-    log(`${signal} — shutting down`);
+    log(`🛑 ${signal} — shutting down`);
     for (const [camId] of cameras.entries()) {
         stopRecording(camId);
     }
-    await new Promise(r => setTimeout(r, 2000)); // let streams flush
+    
+    // Close servers
+    if (httpServer)  httpServer.close();
+    if (gameWss)     gameWss.close();
+    if (videoWss)    videoWss.close();
+    if (mainWs)      mainWs.close();
+
+    await new Promise(r => setTimeout(r, 1000)); // let streams flush
+    log('👋 Stopped');
     process.exit(0);
 }
 
@@ -975,5 +1036,6 @@ log(`   MainServer : ${CFG.mainServerWs}`);
 log(`   Ports: game=${CFG.localPort}  http=${CFG.httpPort}  video=${CFG.videoPort}`);
 log(`   Max cameras : ${CFG.maxCams}`);
 log(`   Recordings  : ${CFG.recordingsDir}`);
+log(`   Static Root : ${CFG.staticRoot}`);
 
 connectToMain();
