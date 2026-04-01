@@ -534,6 +534,7 @@ function makeCamEntry(camId, gameWsArg, videoWsArg, label) {
         bytesWritten: 0,
         lastChunk   : null,
         viewers     : new Set(),
+        initChunk: null,
     };
 }
 
@@ -576,8 +577,19 @@ function startRecording(camId) {
         cam.recFile   = null;
     });
 
+    // ALWAYS write the initChunk first if it exists
+    if (cam.initChunk) {
+        cam.recFile.write(cam.initChunk);
+        cam.bytesWritten += cam.initChunk.length;
+    }
+    
+
     // ── Flush buffered chunks so the file starts with the init segment ──
     const buffered = chunkBuffers.get(camId) || [];
+    for (const b of buffered) {
+        cam.recFile.write(b);
+        cam.bytesWritten += b.length;
+    }
     if (buffered.length > 0) {
         log(`🔴 Writing ${buffered.length} buffered chunk(s) → ${filename}`);
         for (const chunk of buffered) {
@@ -1025,9 +1037,14 @@ function handleCamControlMsg(camId, msg) {
 
 function handleVideoChunk(camId, cam, chunk) {
     const buf = Buffer.from(chunk);
+
+    // Capture the very first chunk as the init segment
+    if (!cam.initChunk) {
+        cam.initChunk = buf;
+        log(`📦 [${camId}] Saved WebM Header (Init Segment)`);
+    }
     cam.lastChunk = buf;
 
-    // Always buffer recent chunks so recording starts with the init segment
     if (!cam.recording) {
         bufferChunk(camId, buf);
     }

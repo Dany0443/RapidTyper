@@ -280,6 +280,29 @@ function logoutStream() {
 //  CAMERA
 // ════════════════════════════════════════════════════════════
 
+function initVideoSocket() {
+    videoWs = new WebSocket(VIDEO_WS_URL);
+    videoWs.binaryType = 'arraybuffer'; // Crucial for binary chunks
+
+    videoWs.onopen = () => {
+        log('📹 Video socket open, authenticating...');
+        // MANDATORY: The server won't record without this!
+        videoWs.send(JSON.stringify({
+            type: 'STREAM_AUTH',
+            camId: myCamId, // Ensure this is the same ID used in the game socket
+            key: STREAM_KEY
+        }));
+    };
+
+    videoWs.onclose = () => {
+        log('📹 Video socket closed, retrying...');
+        setTimeout(initVideoSocket, 2000);
+    };
+
+    videoWs.onerror = (e) => err('📹 Video socket error', e);
+}
+
+
 /**
  * Returns navigator.mediaDevices or null.
  * On plain HTTP (non-localhost) the API is blocked by browsers — show a clear
@@ -575,11 +598,11 @@ function actuallyStartMediaRecorder() {
     } catch (e) { log('⚠ MediaRecorder: ' + e.message); return; }
 
     mediaRec.ondataavailable = e => {
-        if (!e.data || e.data.size === 0 || !videoWs || videoWs.readyState !== WebSocket.OPEN) return;
-        e.data.arrayBuffer().then(buf => {
-            if (videoWs && videoWs.readyState === WebSocket.OPEN) videoWs.send(buf);
-        }).catch(() => {});
-    };
+    if (e.data && e.data.size > 0 && videoWs?.readyState === WebSocket.OPEN) {
+        // Sending the blob directly is often more efficient
+        videoWs.send(e.data); 
+    }
+};
 
     mediaRec.onstop  = () => { recording = false; };
     mediaRec.onerror = e  => { log('⚠ recorder: ' + (e.error?.message || '')); stopMediaRecorder(); };
