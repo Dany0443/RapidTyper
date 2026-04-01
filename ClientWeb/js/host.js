@@ -360,6 +360,26 @@ const WS_URL = window.__WS_URL__ || `ws://${location.hostname || "localhost"}:58
             }
         }
 
+        // ── Announcement ──────────────────────────────────────────────
+        function sendAnnouncement() {
+            const input = document.getElementById('announcement-input');
+            if (!input) return;
+            const text = input.value.trim();
+            if (!text) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const persist = document.getElementById('announcement-persist')?.checked ?? true;
+            ws.send(JSON.stringify({ type: 'HOST_ANNOUNCEMENT', text, persist }));
+            input.value = '';
+            // Visual feedback on button
+            const btn = document.getElementById('announcement-send-btn');
+            if (btn) { const orig = btn.textContent; btn.textContent = '✓ Sent'; setTimeout(() => { btn.textContent = orig; }, 1500); }
+        }
+
+        function clearAnnouncement() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            ws.send(JSON.stringify({ type: 'HOST_ANNOUNCEMENT', text: '', clear: true }));
+        }
+
         // ── Spell state UI ────────────────────────────────────────────
         function setSpellRunningState(running) {
             const stEl    = document.getElementById('spell-state-text');

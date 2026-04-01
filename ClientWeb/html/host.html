@@ -253,7 +253,117 @@
                         <video id="host-preview-video" autoplay muted playsinline style="width:100%;border-radius:8px;background:#000;aspect-ratio:16/9"></video>
                     </div>
                 </div>
+
+                <div class="announcement-panel" style="
+            background: var(--panel, #2c2e31);
+            border: 1px solid rgba(255,255,255,0.07);
+            border-radius: 10px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        ">
+            <div style="
+                font-size: 0.65rem;
+                font-weight: 700;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+                color: var(--sub, #646669);
+                margin-bottom: 0.75rem;
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+            ">
+                <i class="fa-solid fa-bullhorn" style="color: var(--main, #e2b714)"></i>
+                Announcement
             </div>
+        
+            <!-- Text input -->
+            <textarea
+                id="announcement-input"
+                placeholder="Type announcement text..."
+                rows="2"
+                style="
+                    width: 100%;
+                    background: rgba(0,0,0,0.2);
+                    border: 2px solid var(--sub, #646669);
+                    border-radius: 8px;
+                    color: var(--text, #d1d0c5);
+                    font: 14px 'Roboto Mono', monospace;
+                    padding: 0.6rem 0.85rem;
+                    resize: none;
+                    outline: none;
+                    margin-bottom: 0.6rem;
+                    transition: border-color 0.15s;
+                "
+                onfocus="this.style.borderColor='var(--main)'"
+                onblur="this.style.borderColor='var(--sub)'"
+                onkeydown="if(event.ctrlKey && event.key==='Enter') sendAnnouncement()"
+            ></textarea>
+        
+            <!-- Options + buttons row -->
+            <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+        
+                <!-- Persist toggle -->
+                <label style="
+                    display: flex; align-items: center; gap: 0.35rem;
+                    font-size: 0.7rem; color: var(--sub); cursor: pointer;
+                    user-select: none;
+                ">
+                    <input
+                        type="checkbox"
+                        id="announcement-persist"
+                        checked
+                        style="accent-color: var(--main, #e2b714); width: 14px; height: 14px;"
+                    >
+                    Keep as ticker
+                </label>
+        
+                <div style="flex: 1"></div>
+        
+                <!-- Clear button -->
+                <button
+                    onclick="clearAnnouncement()"
+                    style="
+                        padding: 0.4rem 0.85rem;
+                        background: transparent;
+                        border: 1px solid var(--sub, #646669);
+                        border-radius: 6px;
+                        color: var(--sub, #646669);
+                        font: 700 0.7rem 'Roboto Mono', monospace;
+                        cursor: pointer;
+                        transition: all 0.15s;
+                    "
+                    onmouseover="this.style.borderColor='var(--text)';this.style.color='var(--text)'"
+                    onmouseout="this.style.borderColor='var(--sub)';this.style.color='var(--sub)'"
+                >
+                    ✕ Clear
+                </button>
+        
+                <!-- Send button -->
+                <button
+                    id="announcement-send-btn"
+                    onclick="sendAnnouncement()"
+                    style="
+                        padding: 0.4rem 1rem;
+                        background: transparent;
+                        border: 2px solid var(--main, #e2b714);
+                        border-radius: 6px;
+                        color: var(--main, #e2b714);
+                        font: 700 0.7rem 'Roboto Mono', monospace;
+                        cursor: pointer;
+                        transition: all 0.15s;
+                    "
+                    onmouseover="this.style.background='var(--main)';this.style.color='var(--bg)'"
+                    onmouseout="this.style.background='transparent';this.style.color='var(--main)'"
+                >
+                    <i class="fa-solid fa-paper-plane" style="margin-right: 4px"></i>
+                    Send  <span style="font-size:0.6rem;opacity:0.6">Ctrl+Enter</span>
+                </button>
+            </div>
+        </div>
+
+            </div>
+
+        
 
         </div>
 

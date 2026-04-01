@@ -282,6 +282,7 @@ function connectToMain() {
 
     mainWs.on('message', raw => {
         _lastMainMsg = Date.now();
+        _missedPings = 0;   // any message from main proves connection is alive
         if (raw instanceof Buffer && raw[0] !== 0x7b) return;
         let msg;
         try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -312,20 +313,46 @@ function scheduleMainReconnect() {
     mainReconnectTimer = setTimeout(connectToMain, delay);
 }
 
-// ── Heartbeat: if main goes silent for 60s, force reconnect ──────────────────
+// ── Heartbeat: ping main server every 30s, detect true silence after 5 min ───
+// The main server only sends messages when there is game activity. During idle
+// periods it sends nothing to school nodes — that is normal, not a dead connection.
+// We send our own PING and update _lastMainMsg on any response (including PONG).
+// Only declare the connection dead if we haven't heard ANYTHING for 5 minutes
+// AND our last ping went unanswered for 2 intervals (60s).
+let _lastPingSent = 0;
+let _missedPings  = 0;
+
 function _startHeartbeat() {
     _stopHeartbeat();
+    _missedPings  = 0;
+    _lastPingSent = 0;
     _heartbeatTimer = setInterval(() => {
-        if (!mainConnected) return;
-        const silent = Date.now() - _lastMainMsg;
-        if (silent > 60_000) {
-            warn(`💔 MainServer silent for ${Math.round(silent / 1000)}s — forcing reconnect`);
+        if (!mainConnected || !mainWs || mainWs.readyState !== 1) return;
+
+        const now    = Date.now();
+        const silent = now - _lastMainMsg;
+
+        // Send a ping every 30s regardless
+        try { mainWs.send(JSON.stringify({ type: 'PING', from: 'school', schoolId: CFG.schoolId })); }
+        catch (_) {}
+
+        // If we sent a ping last interval and got no reply at all, count it
+        if (_lastPingSent > 0 && silent > (_lastPingSent - _lastMainMsg + 5000)) {
+            _missedPings++;
+        } else {
+            _missedPings = 0;
+        }
+        _lastPingSent = now;
+
+        // Only force-reconnect if silent for 5 min AND 2+ consecutive pings unanswered
+        if (silent > 300_000 && _missedPings >= 2) {
+            warn(`💔 MainServer truly silent for ${Math.round(silent / 1000)}s (${_missedPings} pings unanswered) — forcing reconnect`);
             try { mainWs.terminate(); } catch (_) {}
             mainConnected = false;
             _stopHeartbeat();
             scheduleMainReconnect();
         }
-    }, 15_000);
+    }, 30_000);
 }
 
 function _stopHeartbeat() {
@@ -338,6 +365,10 @@ function handleMainMessage(msg) {
         case 'SCHOOL_REGISTER_OK':
             if (_regConfirmTimer) { clearTimeout(_regConfirmTimer); _regConfirmTimer = null; }
             logger.school(`✅ Registered with MainServer as "${CFG.schoolId}"`);
+            break;
+
+        case 'PONG':
+            // Heartbeat reply — _lastMainMsg and _missedPings already updated in message handler
             break;
 
         // Host wants to view a camera live (WebRTC)
@@ -510,6 +541,20 @@ function makeCamEntry(camId, gameWsArg, videoWsArg, label) {
 //  RECORDING
 // ══════════════════════════════════════════════════════════════════════════
 
+// Ring-buffer: keep the last ~10s of chunks per camera so that when recording
+// starts we can write the init segment + recent data instead of starting mid-stream
+// (a webm without its init cluster is unreadable by anything).
+// Map<camId, Buffer[]>   — cleared when recording stops
+const chunkBuffers = new Map();
+const CHUNK_BUF_MAX = 20;   // ~10s at 1s timeslice
+
+function bufferChunk(camId, chunk) {
+    if (!chunkBuffers.has(camId)) chunkBuffers.set(camId, []);
+    const buf = chunkBuffers.get(camId);
+    buf.push(chunk);
+    if (buf.length > CHUNK_BUF_MAX) buf.shift();
+}
+
 function startRecording(camId) {
     const cam = cameras.get(camId);
     if (!cam)          { warn(`startRecording: cam ${camId} not found`);       return; }
@@ -531,7 +576,22 @@ function startRecording(camId) {
         cam.recFile   = null;
     });
 
-    log(`🔴 Recording started: ${filename}`);
+    // ── Flush buffered chunks so the file starts with the init segment ──
+    const buffered = chunkBuffers.get(camId) || [];
+    if (buffered.length > 0) {
+        log(`🔴 Writing ${buffered.length} buffered chunk(s) → ${filename}`);
+        for (const chunk of buffered) {
+            try {
+                cam.recFile.write(chunk);
+                cam.bytesWritten += chunk.length;
+            } catch (e) { err(`Buffer flush error (${camId}): ${e.message}`); break; }
+        }
+    } else {
+        log(`🔴 Recording started (no buffer yet): ${filename}`);
+    }
+    // Clear buffer — from here chunks write directly
+    chunkBuffers.set(camId, []);
+
     notifyMainCameraState();
     sendToCam(camId, { type: 'RECORDING_STARTED', filename });
     return filename;
@@ -542,15 +602,19 @@ function stopRecording(camId) {
     if (!cam || !cam.recording) return;
 
     cam.recording = false;
+    chunkBuffers.delete(camId);
 
     if (cam.recFile) {
         cam.recFile.end(() => {
             const duration = ((Date.now() - cam.recStartedAt) / 1000).toFixed(1);
             const sizeMB   = (cam.bytesWritten / 1024 / 1024).toFixed(2);
-            log(`⏹  Recording done: ${path.basename(cam.recPath)} — ${duration}s, ${sizeMB}MB`);
+            log(`⏹  Recording saved: ${path.basename(cam.recPath)} — ${duration}s, ${sizeMB} MB`);
             notifyMainCameraState();
-            // Non-blocking H.265 transcode
-            transcodeToH265(cam.recPath);
+            if (cam.bytesWritten > 50_000) {
+                transcodeToMp4(cam.recPath);
+            } else {
+                warn(`⚠️  Recording too small (${sizeMB} MB) — skipping transcode`);
+            }
         });
         cam.recFile = null;
     }
@@ -558,100 +622,141 @@ function stopRecording(camId) {
     sendToCam(camId, { type: 'RECORDING_STOPPED' });
 }
 
-function transcodeToH265(inputPath) {
-    // Output file sits next to the .webm
-    const outputPath = inputPath.replace(/\.webm$/, '_h265.mp4');
+function transcodeToMp4(inputPath) {
+    if (!FFMPEG_OK) {
+        warn(`⚠️  ffmpeg not available — keeping .webm: ${path.basename(inputPath)}`);
+        return;
+    }
 
-    const args = [
-        '-i', inputPath,
-        '-c:v', 'libx265',
-        '-crf', '28',        // 0=lossless, 28=good balance, 51=worst
-        '-preset', 'fast',   // fast tradeoff: not ultra-slow but still small files
-        '-c:a', 'aac',
-        '-b:a', '128k',
+    const outputPath = inputPath.replace(/\.webm$/, '.mp4');
+    log(`🔄 Transcoding → MP4: ${path.basename(inputPath)}`);
+
+    // Strategy:
+    //   1. Try re-encoding video with libx264 + aac (most compatible)
+    //   2. If that fails, try stream-copy (fastest, works when codec is already h264)
+    //   3. If both fail, keep the .webm as-is and log clearly
+
+    function attemptTranscode(args, label, onFail) {
+        const ff = spawn(CFG.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        let ffErr = '';
+        ff.stderr.on('data', d => { ffErr += d.toString().slice(-500); });  // keep last 500 chars
+
+        ff.on('close', code => {
+            if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 1000) {
+                const sizeMB = (fs.statSync(outputPath).size / 1024 / 1024).toFixed(1);
+                log(`✅ Transcode done [${label}]: ${path.basename(outputPath)} (${sizeMB} MB)`);
+                notifyMainCameraState();
+            } else {
+                warn(`⚠️  Transcode failed [${label}] (exit ${code}): ${ffErr.trim().split('\n').pop()}`);
+                try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
+                if (onFail) onFail();
+            }
+        });
+
+        ff.on('error', e => {
+            warn(`⚠️  ffmpeg spawn error [${label}]: ${e.message}`);
+            if (onFail) onFail();
+        });
+
+        setTimeout(() => { try { ff.kill(); } catch (_) {} }, 600_000);
+        return ff;
+    }
+
+    // Pass 1: re-encode (vp8/vp9 webm → h264 mp4)
+    const encodeArgs = [
+        '-y', '-i', inputPath,
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-c:a', 'aac', '-b:a', '128k',
         '-movflags', '+faststart',
-        '-y',
+        '-max_muxing_queue_size', '1024',
         outputPath,
     ];
 
-    log(`🔄 Transcoding → H.265: ${path.basename(outputPath)}`);
-
-    const ff = spawn(CFG.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    ff.stderr.on('data', () => {}); // suppress output
-
-    ff.on('close', code => {
-        if (code === 0) {
-            const stat = fs.existsSync(outputPath) ? fs.statSync(outputPath) : null;
-            const sizeMB = stat ? (stat.size / 1024 / 1024).toFixed(1) + 'MB' : '?';
-            log(`✅ H.265 transcode done: ${path.basename(outputPath)} (${sizeMB})`);
-            // Notify MainServer so host.html recordings list updates
-            notifyMainCameraState();
-        } else {
-            warn(`H.265 transcode failed (exit ${code}) — .webm kept`);
-        }
+    attemptTranscode(encodeArgs, 'libx264', () => {
+        // Pass 2: stream copy (if camera already sent h264 — rare on WebRTC but possible)
+        const copyArgs = [
+            '-y', '-i', inputPath,
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart',
+            outputPath,
+        ];
+        attemptTranscode(copyArgs, 'copy', () => {
+            warn(`⚠️  All transcode attempts failed — .webm is kept: ${path.basename(inputPath)}`);
+        });
     });
-
-    ff.on('error', e => {
-        warn(`ffmpeg error: ${e.message} — skipping transcode, .webm kept`);
-    });
-
-    // Safety kill after 10 minutes
-    setTimeout(() => { try { ff.kill(); } catch (_) {} }, 600_000);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
 //  THUMBNAIL GENERATION
-//  Every 500ms: snapshot one JPEG frame from the latest chunk of each
-//  streaming camera and push it to MainServer as a binary frame.
+//  Primary path: camera phone sends CAM_THUMB (canvas JPEG) every 2s.
+//  Fallback path: if no phone-side thumb in 60s, try ffmpeg on lastChunk.
+//  The phone canvas path is faster, always on, and needs no ffmpeg.
 // ══════════════════════════════════════════════════════════════════════════
-const thumbLastSent = new Map();
+const thumbLastSent     = new Map();   // camId → last sent timestamp (any source)
+const thumbFfmpegActive = new Map();   // camId → bool (prevent parallel ffmpeg)
 
+// Phone-side canvas thumbnail received — relay immediately to MainServer
+function relayPhoneThumbnail(camId, jpegB64, w) {
+    if (!mainConnected) return;
+    thumbLastSent.set(camId, Date.now());
+    try {
+        const jpeg      = Buffer.from(jpegB64, 'base64');
+        const header    = JSON.stringify({
+            type    : 'CAM_THUMBNAIL', schoolId: CFG.schoolId,
+            camId, camKey: `${CFG.schoolId}::${camId}`, ts: Date.now(), w: w || 320,
+        });
+        const headerBuf = Buffer.alloc(256, 0);
+        headerBuf.write(header.substring(0, 255));
+        safeSendMainBinary(Buffer.concat([headerBuf, jpeg]));
+    } catch (_) {}
+}
+
+// Fallback: every 15s check if any streaming camera hasn't sent a thumb for 60s
+// and try ffmpeg on its lastChunk (requires recording to have produced a valid webm chunk)
 setInterval(() => {
+    if (!FFMPEG_OK) return;
+    const now = Date.now();
     for (const [camId, cam] of cameras.entries()) {
         if (!cam.streaming || !cam.lastChunk) continue;
-        const now  = Date.now();
         const last = thumbLastSent.get(camId) || 0;
-        if (now - last < 1000 / CFG.thumbFps) continue;
-        thumbLastSent.set(camId, now);
-        generateThumbnail(camId, cam.lastChunk);
+        if (now - last < 60_000) continue;          // phone thumb is recent enough
+        if (thumbFfmpegActive.get(camId)) continue; // already running
+        thumbFfmpegActive.set(camId, true);
+        generateThumbnailFfmpeg(camId, cam.lastChunk);
     }
-}, 500);
+}, 15_000);
 
-function generateThumbnail(camId, chunk) {
-    if (!mainConnected) return;
+function generateThumbnailFfmpeg(camId, chunk) {
+    if (!mainConnected) { thumbFfmpegActive.set(camId, false); return; }
 
     const ff = spawn(CFG.ffmpegPath, [
         '-loglevel', 'quiet',
-        '-i',        'pipe:0',
-        '-vframes',  '1',
-        '-vf',       `scale=${CFG.thumbWidth}:-1`,
-        '-f',        'image2',
-        '-vcodec',   'mjpeg',
+        '-i', 'pipe:0',
+        '-vframes', '1',
+        '-vf', `scale=${CFG.thumbWidth}:-1`,
+        '-f', 'image2', '-vcodec', 'mjpeg',
         'pipe:1',
     ], { stdio: ['pipe', 'pipe', 'ignore'] });
 
     const parts = [];
     ff.stdout.on('data', d => parts.push(d));
     ff.stdout.on('end', () => {
+        thumbFfmpegActive.set(camId, false);
         if (!parts.length || !mainConnected) return;
         const jpeg      = Buffer.concat(parts);
         const header    = JSON.stringify({
-            type    : 'CAM_THUMBNAIL',
-            schoolId: CFG.schoolId,
-            camId,
-            camKey  : `${CFG.schoolId}::${camId}`,
-            ts      : Date.now(),
-            w       : CFG.thumbWidth,
+            type: 'CAM_THUMBNAIL', schoolId: CFG.schoolId,
+            camId, camKey: `${CFG.schoolId}::${camId}`, ts: Date.now(), w: CFG.thumbWidth,
         });
         const headerBuf = Buffer.alloc(256, 0);
         headerBuf.write(header.substring(0, 255));
         safeSendMainBinary(Buffer.concat([headerBuf, jpeg]));
+        thumbLastSent.set(camId, Date.now());
     });
 
-    try { ff.stdin.write(chunk); ff.stdin.end(); }
-    catch (e) { try { ff.kill(); } catch (_) {} }
-
-    setTimeout(() => { try { ff.kill(); } catch (_) {} }, 4000);
+    ff.on('error', () => { thumbFfmpegActive.set(camId, false); });
+    try { ff.stdin.write(chunk); ff.stdin.end(); } catch (_) { thumbFfmpegActive.set(camId, false); try { ff.kill(); } catch (_) {} }
+    setTimeout(() => { thumbFfmpegActive.set(camId, false); try { ff.kill(); } catch (_) {} }, 5000);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -910,20 +1015,7 @@ function handleCamControlMsg(camId, msg) {
         // the admin host grid can show it without needing ffmpeg or recording.
         case 'CAM_THUMB': {
             if (!msg.jpeg || !mainConnected) break;
-            try {
-                const jpegBuf  = Buffer.from(msg.jpeg, 'base64');
-                const header   = JSON.stringify({
-                    type    : 'CAM_THUMBNAIL',
-                    schoolId: CFG.schoolId,
-                    camId,
-                    camKey  : `${CFG.schoolId}::${camId}`,
-                    ts      : Date.now(),
-                    w       : msg.w || 320,
-                });
-                const headerBuf = Buffer.alloc(256, 0);
-                headerBuf.write(header.substring(0, 255));
-                safeSendMainBinary(Buffer.concat([headerBuf, jpegBuf]));
-            } catch (_) {}
+            relayPhoneThumbnail(camId, msg.jpeg, msg.w || 320);
             break;
         }
     }   // end switch
@@ -932,15 +1024,21 @@ function handleCamControlMsg(camId, msg) {
 // ── Video chunk handler ────────────────────────────────────────────────────
 
 function handleVideoChunk(camId, cam, chunk) {
-    cam.lastChunk = Buffer.from(chunk);
+    const buf = Buffer.from(chunk);
+    cam.lastChunk = buf;
 
-    // 1. Write to disk if recording
+    // Always buffer recent chunks so recording starts with the init segment
+    if (!cam.recording) {
+        bufferChunk(camId, buf);
+    }
+
+    // Write to disk if recording
     if (cam.recording && cam.recFile) {
         try {
-            cam.recFile.write(cam.lastChunk);
-            cam.bytesWritten += cam.lastChunk.length;
-            if (cam.bytesWritten % (10 * 1024 * 1024) < cam.lastChunk.length) {
-                log(`💾 ${camId}: ${(cam.bytesWritten / 1024 / 1024).toFixed(1)}MB recorded`);
+            cam.recFile.write(buf);
+            cam.bytesWritten += buf.length;
+            if (cam.bytesWritten % (10 * 1024 * 1024) < buf.length) {
+                log(`💾 ${camId}: ${(cam.bytesWritten / 1024 / 1024).toFixed(1)} MB recorded`);
             }
         } catch (e) {
             err(`Write error (${camId}): ${e.message}`);
@@ -949,17 +1047,11 @@ function handleVideoChunk(camId, cam, chunk) {
         }
     }
 
-    // 2. Relay raw chunk to MainServer for presentation MSE playback
-    const header    = JSON.stringify({
-        type    : 'VIDEO_CHUNK',
-        schoolId: CFG.schoolId,
-        camId,
-        camKey  : `${CFG.schoolId}::${camId}`,
-        ts      : Date.now(),
-    });
+    // Relay raw chunk to MainServer for viewers
+    const header    = JSON.stringify({ type: 'VIDEO_CHUNK', schoolId: CFG.schoolId, camId, camKey: `${CFG.schoolId}::${camId}`, ts: Date.now() });
     const headerBuf = Buffer.alloc(256, 0);
     headerBuf.write(header.substring(0, 255));
-    safeSendMainBinary(Buffer.concat([headerBuf, cam.lastChunk]));
+    safeSendMainBinary(Buffer.concat([headerBuf, buf]));
 }
 
 // ── Client role tracking ───────────────────────────────────────────────────

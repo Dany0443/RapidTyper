@@ -165,6 +165,15 @@ function handleMessage(data) {
             updateCamLayout();
             break;
 
+        // ── Announcement from host ────────────────────────────────────────────
+        case 'PRESENTATION_ANNOUNCEMENT':
+            if (data.clear) {
+                clearAnnouncement();
+            } else if (data.text) {
+                showAnnouncement(data.text, !!data.persist);
+            }
+            break;
+
         // ── WebRTC signaling ─────────────────────────────────────────────────
         case 'STREAM_OFFER':
             if (!data.sdp) break;
@@ -603,6 +612,146 @@ function updateCamLayout() {
                     display:block;
                 `;
         }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ANNOUNCEMENT OVERLAY
+//  Flow:
+//    1. showAnnouncement(text, persist)
+//       – Overlay appears full-screen with BIG text (font-size: 8vw)
+//       – After 7s the overlay shrinks to a bottom ticker bar (font-size: 1.4rem)
+//       – If persist=true it stays as ticker until clearAnnouncement() is called
+//       – If persist=false the ticker fades out after another 5s
+//    2. clearAnnouncement() — removes everything immediately
+// ══════════════════════════════════════════════════════════════════════════════
+
+let _annBigTimer    = null;
+let _annTickerTimer = null;
+let _annEl          = null;
+
+function _ensureAnnEl() {
+    if (_annEl && _annEl.isConnected) return _annEl;
+
+    _annEl = document.createElement('div');
+    _annEl.id = 'pres-announcement';
+    _annEl.style.cssText = `
+        position: fixed;
+        bottom: 0; left: 0; right: 0;
+        z-index: 9990;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-end;
+        pointer-events: none;
+        transition: none;
+    `;
+
+    // Big text layer
+    const big = document.createElement('div');
+    big.id = 'pres-ann-big';
+    big.style.cssText = `
+        width: 100%;
+        padding: 4vh 6vw;
+        background: linear-gradient(to top, rgba(30,31,34,0.97) 0%, rgba(30,31,34,0.85) 70%, transparent 100%);
+        color: #e2b714;
+        font-family: 'Roboto Mono', monospace;
+        font-size: 7vw;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        line-height: 1.2;
+        text-align: center;
+        text-shadow: 0 2px 24px rgba(0,0,0,0.9);
+        opacity: 0;
+        transform: translateY(40px);
+        transition: opacity 0.5s ease, transform 0.5s ease;
+        word-break: break-word;
+    `;
+
+    // Ticker bar layer (hidden initially)
+    const ticker = document.createElement('div');
+    ticker.id = 'pres-ann-ticker';
+    ticker.style.cssText = `
+        width: 100%;
+        padding: 0.7rem 2rem;
+        background: rgba(30,31,34,0.96);
+        border-top: 2px solid rgba(226,183,20,0.5);
+        color: #e2b714;
+        font-family: 'Roboto Mono', monospace;
+        font-size: 1.4rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-align: center;
+        opacity: 0;
+        transition: opacity 0.6s ease;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: none;
+    `;
+
+    _annEl.appendChild(big);
+    _annEl.appendChild(ticker);
+    document.body.appendChild(_annEl);
+    return _annEl;
+}
+
+function showAnnouncement(text, persist) {
+    clearAnnouncement(false); // clear timers but don't remove DOM yet — we're about to repopulate
+
+    const el     = _ensureAnnEl();
+    const big    = el.querySelector('#pres-ann-big');
+    const ticker = el.querySelector('#pres-ann-ticker');
+
+    big.textContent    = text;
+    ticker.textContent = '◆  ' + text + '  ◆';
+
+    // Reset to big-text state
+    ticker.style.display = 'none';
+    ticker.style.opacity = '0';
+    big.style.display    = 'flex';
+
+    // Animate big text in (next frame so transition fires)
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            big.style.opacity   = '1';
+            big.style.transform = 'translateY(0)';
+        });
+    });
+
+    // After 7s: slide big text out and show ticker
+    _annBigTimer = setTimeout(() => {
+        big.style.opacity   = '0';
+        big.style.transform = 'translateY(20px)';
+
+        setTimeout(() => {
+            big.style.display    = 'none';
+            ticker.style.display = 'block';
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => { ticker.style.opacity = '1'; });
+            });
+
+            if (!persist) {
+                // Non-persistent: fade ticker out after 5s
+                _annTickerTimer = setTimeout(() => {
+                    ticker.style.opacity = '0';
+                    setTimeout(() => {
+                        if (_annEl) _annEl.remove();
+                        _annEl = null;
+                    }, 700);
+                }, 5000);
+            }
+            // Persistent: ticker stays until host sends clear
+        }, 550);
+    }, 7000);
+}
+
+function clearAnnouncement(removeEl = true) {
+    if (_annBigTimer)    { clearTimeout(_annBigTimer);    _annBigTimer    = null; }
+    if (_annTickerTimer) { clearTimeout(_annTickerTimer); _annTickerTimer = null; }
+    if (removeEl && _annEl) {
+        _annEl.remove();
+        _annEl = null;
     }
 }
 

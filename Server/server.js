@@ -998,6 +998,23 @@ async function handleMessage(ws, data) {
             break;
         }
 
+        // ── Announcement — host sends text to all presentation screens ────────
+        case 'HOST_ANNOUNCEMENT': {
+            const p = gameState.state.players.get(ws); if (p?.role !== 'admin') break;
+            const msg = JSON.stringify({
+                type   : 'PRESENTATION_ANNOUNCEMENT',
+                text   : (data.text || '').substring(0, 300),
+                persist: !!data.persist,   // true = keep as small ticker after big display
+                clear  : !!data.clear,     // true = clear any active announcement
+            });
+            for (const [pws, pp] of gameState.state.players) {
+                if (pp.role !== 'viewer') continue;
+                if (pws instanceof VirtualClient) pws.send(msg);
+                else if (pws.readyState === WebSocket.OPEN) pws.send(msg);
+            }
+            break;
+        }
+
         case 'RECORDING_START':
         case 'RECORDING_STOP': {
             const p = gameState.state.players.get(ws); if (p?.role !== 'admin') break;
