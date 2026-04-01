@@ -147,5 +147,5 @@ data/
 db/
 LICENSE
 package-lock.json
-certs/
-recordings/
+SchoolServer/certs/
+SchoolServer/recordings/
