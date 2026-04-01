@@ -21,9 +21,15 @@ let reconnectAttempts = 0;
 let currentRound      = 0;
 let maxRounds         = 0;
 let cdInterval        = null;
-let camPc             = null;
-let camViewerId       = null;
 
+// ── Multi-camera state ────────────────────────────────────────────────────────
+// Map<camKey, { pc: RTCPeerConnection, viewerId: string, videoEl: HTMLVideoElement|null }>
+const camConnections = new Map();
+let fullscreenMode   = false;
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  WEBSOCKET
+// ══════════════════════════════════════════════════════════════════════════════
 function connect() {
     ws = new WebSocket(WS_URL);
     ws.onopen = () => {
@@ -132,27 +138,68 @@ function handleMessage(data) {
             if (gamePhase !== 'RACING') { gamePhase = 'COUNTDOWN'; runCountdown(data.count); }
             break;
 
-        // ── Camera PiP ────────────────────────────────────────────────
+        // ── Camera messages ───────────────────────────────────────────────────
+
+        // Legacy single-cam: treated as ADD (non-destructive)
         case 'PRESENTATION_CAM_ASSIGNED':
-            startCamView(data.schoolId, data.camId, data.camKey);
+            addCamView(data.schoolId, data.camId, data.camKey, null /* no server viewerId */);
             break;
 
+        // New multi-cam: server has already set up routing; viewerId included
+        case 'PRESENTATION_CAM_ADDED':
+            addCamView(data.schoolId, data.camId, data.camKey, data.viewerId || null);
+            break;
+
+        // Remove a specific camera (camKey provided) or all (legacy, no camKey)
         case 'PRESENTATION_CAM_REMOVED':
-            closeCamView();
+            if (data.camKey) {
+                removeCamView(data.camKey);
+            } else {
+                closeAllCamViews();
+            }
             break;
 
+        // Host sends fullscreen on/off
+        case 'PRESENTATION_FULLSCREEN':
+            fullscreenMode = !!data.enabled;
+            updateCamLayout();
+            break;
+
+        // ── WebRTC signaling ─────────────────────────────────────────────────
         case 'STREAM_OFFER':
-            if (data.sdp && camPc) answerCamOffer(data.sdp, data.viewerId || camViewerId);
+            if (!data.sdp) break;
+            // Match by viewerId to the right connection
+            for (const [, conn] of camConnections) {
+                if (conn.viewerId === data.viewerId) {
+                    answerOffer(conn.pc, data.sdp, data.viewerId);
+                    break;
+                }
+            }
             break;
 
         case 'STREAM_ICE_FROM_CAM':
-        case 'STREAM_ICE':
-            if (data.candidate && camPc) camPc.addIceCandidate(data.candidate).catch(() => {});
+        case 'STREAM_ICE': {
+            if (!data.candidate) break;
+            let matched = false;
+            // Try viewerId match first
+            for (const [, conn] of camConnections) {
+                if (conn.viewerId === data.viewerId) {
+                    conn.pc.addIceCandidate(data.candidate).catch(() => {});
+                    matched = true; break;
+                }
+            }
+            // Fallback: no viewerId → apply to all (legacy behaviour)
+            if (!matched && !data.viewerId) {
+                for (const [, conn] of camConnections) {
+                    conn.pc.addIceCandidate(data.candidate).catch(() => {});
+                }
+            }
             break;
+        }
     }
 }
 
-// ── Screens ──────────────────────────────────────────────────────────────────
+// ── Screens ───────────────────────────────────────────────────────────────────
 function showScreen(id) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
     const el = document.getElementById(id);
@@ -161,16 +208,16 @@ function showScreen(id) {
 
 function updateRoundBadges() {
     if (!currentRound || !maxRounds) {
-        ['lobby-round-badge','racing-round-badge','results-round-badge','spell-round-badge'].forEach(id => {
-            const el = document.getElementById(id); if (el) el.style.display = 'none';
-        });
+        ['lobby-round-badge','racing-round-badge','results-round-badge','spell-round-badge']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
         return;
     }
     const txt = 'RUNDA ' + currentRound + ' / ' + maxRounds;
-    ['lobby-round-badge','racing-round-badge','results-round-badge','spell-round-badge'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) { el.textContent = txt; el.style.display = 'inline-block'; }
-    });
+    ['lobby-round-badge','racing-round-badge','results-round-badge','spell-round-badge']
+        .forEach(id => {
+            const el = document.getElementById(id);
+            if (el) { el.textContent = txt; el.style.display = 'inline-block'; }
+        });
 }
 
 function renderLobbyModeBadge() {
@@ -187,10 +234,10 @@ function renderLobbyModeBadge() {
 
 function updateUI() {
     renderLobbyModeBadge();
-    if      (gamePhase === 'RACING')        { showScreen('racing-screen');       renderRacing();  }
-    else if (gamePhase === 'FINISHED')      { showScreen('results-screen');      renderResults(); }
-    else if (gamePhase === 'SPELL_ACTIVE')  { showScreen('spell-active-screen'); renderSpellActive(); }
-    else                                    { showScreen('lobby-screen');        renderLobby();   }
+    if      (gamePhase === 'RACING')       { showScreen('racing-screen');       renderRacing();      }
+    else if (gamePhase === 'FINISHED')     { showScreen('results-screen');      renderResults();     }
+    else if (gamePhase === 'SPELL_ACTIVE') { showScreen('spell-active-screen'); renderSpellActive(); }
+    else                                   { showScreen('lobby-screen');        renderLobby();       }
 }
 
 // ── Lobby ─────────────────────────────────────────────────────────────────────
@@ -200,65 +247,40 @@ function renderLobby() {
     const spellPanel = document.getElementById('lobby-spell-list');
     if (gameMode === 'spell') {
         if (gradeGrid)  gradeGrid.style.display  = 'none';
-        if (spellPanel) spellPanel.style.display  = 'flex';
+        if (spellPanel) spellPanel.style.display  = 'block';
         renderSpellerLobby();
     } else {
-        if (gradeGrid)  gradeGrid.style.display  = 'grid';
+        if (gradeGrid)  gradeGrid.style.display  = '';
         if (spellPanel) spellPanel.style.display  = 'none';
-        renderTyperLobby();
+        const grades = ['1-4','5-9','10-12'];
+        grades.forEach(g => {
+            const cnt = document.getElementById(`count-${g}`);
+            if (cnt) cnt.textContent = players.filter(p => p.grade === g).length;
+        });
+        const lobbyCount = document.getElementById('lobby-count');
+        if (lobbyCount) lobbyCount.textContent = players.length;
     }
-}
-
-function renderTyperLobby() {
-    const groups = { '1-4': [], '5-9': [], '10-12': [] };
-    players.forEach(p => { (groups[p.grade] || groups['10-12']).push(p); });
-    const cnt = document.getElementById('lobby-count');
-    if (cnt) cnt.textContent = players.length;
-    ['1-4','5-9','10-12'].forEach(g => {
-        const cntEl  = document.getElementById(`cnt-${g}`);
-        const listEl = document.getElementById(`list-${g}`);
-        if (cntEl) cntEl.textContent = groups[g].length;
-        if (!listEl) return;
-        listEl.innerHTML = groups[g].length === 0
-            ? '<div class="grade-empty">—</div>'
-            : groups[g].map(p => `<div class="lobby-player-row"><div class="player-dot"></div><div class="player-name-lbl">${esc(p.username)}</div></div>`).join('');
-    });
 }
 
 function renderSpellerLobby() {
-    const cnt = document.getElementById('lobby-count');
-    if (cnt) cnt.textContent = spellers.length;
     const el = document.getElementById('lobby-spell-list');
     if (!el) return;
-    if (spellers.length === 0) {
-        el.innerHTML = '<div class="grade-empty" style="padding:3rem;text-align:center;width:100%">Niciun speler conectat</div>';
-        return;
-    }
-    const sorted = [...spellers].sort((a,b) => (a.grade||'').localeCompare(b.grade||'') || (a.username||'').localeCompare(b.username||''));
-    el.innerHTML = sorted.map(s => `
-        <div class="spell-lobby-card">
-            <div class="player-dot" style="background:var(--main);box-shadow:0 0 6px var(--main)"></div>
-            <div class="spell-card-name">${esc(s.username)}</div>
-            <div class="spell-card-grade">${esc(s.grade)}</div>
-            ${s.submitted ? '<div class="spell-card-done">✓</div>' : ''}
+    el.innerHTML = spellers.map(s => `
+        <div class="spell-status-chip ${s.submitted ? 'done' : ''}">
+            ${esc(s.username)}${s.submitted ? ' <span style="color:var(--green)">✓</span>' : ''}
         </div>`).join('');
 }
 
-// ── Spell active screen ───────────────────────────────────────────────────────
 function renderSpellActive() {
+    const el = document.getElementById('spell-submissions');
+    if (!el) return;
     updateSpellSubmissions();
 }
 
 function updateSpellSubmissions() {
-    const submitted = spellers.filter(s => s.submitted).length;
-    const subEl     = document.getElementById('spell-submitted-count');
-    const totalEl   = document.getElementById('spell-total-count');
-    if (subEl)   subEl.textContent   = submitted;
-    if (totalEl) totalEl.textContent = spellers.length;
-
-    const grid = document.getElementById('spell-status-grid');
-    if (!grid) return;
-    grid.innerHTML = spellers.map(s => `
+    const el = document.getElementById('spell-submissions');
+    if (!el) return;
+    el.innerHTML = spellers.map(s => `
         <div class="spell-status-chip ${s.submitted ? 'done' : ''}">
             ${esc(s.username)}${s.submitted ? ' <span style="color:var(--green)">✓</span>' : ''}
         </div>`).join('');
@@ -266,7 +288,7 @@ function updateSpellSubmissions() {
 
 // ── Racing ────────────────────────────────────────────────────────────────────
 function renderRacing() {
-    const sorted = [...players].sort((a, b) => (b.progress || 0) - (a.progress || 0));
+    const sorted   = [...players].sort((a, b) => (b.progress || 0) - (a.progress || 0));
     const tracksEl = document.getElementById('race-tracks');
     if (!tracksEl) return;
 
@@ -326,7 +348,7 @@ function stopRaceTimer() {
 // ── Results ───────────────────────────────────────────────────────────────────
 function renderResults() {
     ['1-4','5-9','10-12'].forEach(grade => {
-        const list = players.filter(p => p.grade === grade).sort((a,b) => (b.wpm||0) - (a.wpm||0));
+        const list  = players.filter(p => p.grade === grade).sort((a,b) => (b.wpm||0) - (a.wpm||0));
         const rcEl  = document.getElementById(`rcount-${grade}`);
         if (rcEl) rcEl.textContent = `${list.length} jucători`;
 
@@ -334,7 +356,11 @@ function renderResults() {
         const restEl = document.getElementById(`rest-${grade}`);
         if (!podEl) return;
 
-        if (list.length === 0) { podEl.innerHTML = '<div class="no-players-msg">Fără participanți</div>'; if (restEl) restEl.innerHTML = ''; return; }
+        if (!list.length) {
+            podEl.innerHTML = '<div class="no-players-msg">Fără participanți</div>';
+            if (restEl) restEl.innerHTML = '';
+            return;
+        }
 
         const slots = [
             { p: list[1], rank: 2, icon: '🥈', cls: 'p2' },
@@ -386,7 +412,11 @@ function runCountdown(startNum) {
         n--;
         if (n > 0) {
             const el = document.getElementById('cd-number');
-            if (el) { const clone = el.cloneNode(true); clone.textContent = n; el.parentNode.replaceChild(clone, el); }
+            if (el) {
+                const clone = el.cloneNode(true);
+                clone.textContent = n;
+                el.parentNode.replaceChild(clone, el);
+            }
         } else {
             clearInterval(cdInterval); cdInterval = null;
             const el = document.getElementById('cd-number');
@@ -397,67 +427,190 @@ function runCountdown(startNum) {
     }, 1000);
 }
 
-// ── Camera PiP ────────────────────────────────────────────────────────────────
-function startCamView(schoolId, camId, camKey) {
-    closeCamView();
-    camViewerId = 'pres-view-' + Math.random().toString(36).substr(2, 6);
+// ══════════════════════════════════════════════════════════════════════════════
+//  MULTI-CAMERA SYSTEM
+// ══════════════════════════════════════════════════════════════════════════════
 
-    camPc = new RTCPeerConnection({
+/**
+ * addCamView — opens a new WebRTC connection for a camera.
+ *  serverViewerId: if provided (new HOST_ADD_CAM_TO_PRESENTATION flow),
+ *                  the server already sent VIEW_CAM_REQUEST with this id.
+ *                  if null (legacy PRESENTATION_CAM_ASSIGNED flow),
+ *                  we send PRESENTATION_SET_CAM ourselves.
+ */
+function addCamView(schoolId, camId, camKey, serverViewerId) {
+    // Ignore duplicates
+    if (camConnections.has(camKey)) return;
+
+    const viewerId = serverViewerId || ('pres-' + Math.random().toString(36).substr(2, 8));
+
+    const pc = new RTCPeerConnection({
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302'  },
             { urls: 'stun:stun1.l.google.com:19302' },
         ],
     });
 
-    camPc.ontrack = e => {
-        const pip = getOrCreatePip();
-        if (pip && e.streams[0]) { pip.srcObject = e.streams[0]; pip.style.display = 'block'; pip.play().catch(()=>{}); }
+    const conn = { pc, viewerId, videoEl: null };
+    camConnections.set(camKey, conn);
+
+    pc.ontrack = e => {
+        if (!e.streams[0]) return;
+        const vid = getOrCreateVideoEl(camKey);
+        vid.srcObject = e.streams[0];
+        vid.play().catch(() => {});
+        conn.videoEl = vid;
+        updateCamLayout();
     };
 
-    camPc.onicecandidate = e => {
+    pc.onicecandidate = e => {
         if (e.candidate && ws?.readyState === WebSocket.OPEN)
-            ws.send(JSON.stringify({ type: 'STREAM_ICE', candidate: e.candidate, viewerId: camViewerId }));
+            ws.send(JSON.stringify({ type: 'STREAM_ICE', candidate: e.candidate, viewerId }));
     };
 
-    camPc.onconnectionstatechange = () => {
-        if (camPc && (camPc.connectionState === 'failed' || camPc.connectionState === 'disconnected')) closeCamView();
+    pc.onconnectionstatechange = () => {
+        const s = pc.connectionState;
+        if (s === 'failed' || s === 'disconnected') removeCamView(camKey);
     };
 
-    if (ws?.readyState === WebSocket.OPEN)
-        ws.send(JSON.stringify({ type: 'PRESENTATION_SET_CAM', schoolId, camId, camKey, viewerId: camViewerId }));
+    if (!serverViewerId) {
+        // Legacy flow: register ourselves as viewer so server can route STREAM_OFFER
+        if (ws?.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({ type: 'PRESENTATION_SET_CAM', schoolId, camId, camKey, viewerId }));
+    }
+
+    updateCamLayout();
 }
 
-async function answerCamOffer(sdp, viewerId) {
-    if (!camPc) return;
+function removeCamView(camKey) {
+    const conn = camConnections.get(camKey);
+    if (!conn) return;
+    try { conn.pc.close(); } catch (_) {}
+    if (conn.videoEl) {
+        conn.videoEl.srcObject = null;
+        conn.videoEl.remove();
+    }
+    camConnections.delete(camKey);
+    updateCamLayout();
+}
+
+function closeAllCamViews() {
+    for (const camKey of [...camConnections.keys()]) removeCamView(camKey);
+}
+
+async function answerOffer(pc, sdp, viewerId) {
     try {
-        await camPc.setRemoteDescription({ type: 'offer', sdp });
-        const answer = await camPc.createAnswer();
-        await camPc.setLocalDescription(answer);
+        await pc.setRemoteDescription({ type: 'offer', sdp });
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
         if (ws?.readyState === WebSocket.OPEN)
-            ws.send(JSON.stringify({ type: 'STREAM_ANSWER', sdp: answer.sdp, viewerId: viewerId || camViewerId }));
+            ws.send(JSON.stringify({ type: 'STREAM_ANSWER', sdp: answer.sdp, viewerId }));
     } catch (_) {}
 }
 
-function closeCamView() {
-    if (camPc) { try { camPc.close(); } catch (_) {} camPc = null; }
-    const pip = document.getElementById('cam-pip');
-    if (pip) { pip.srcObject = null; pip.style.display = 'none'; }
-    camViewerId = null;
-}
+// ══════════════════════════════════════════════════════════════════════════════
+//  CAMERA OVERLAY LAYOUT
+// ══════════════════════════════════════════════════════════════════════════════
 
-function getOrCreatePip() {
-    let pip = document.getElementById('cam-pip');
-    if (!pip) {
-        pip = document.createElement('video');
-        pip.id = 'cam-pip'; pip.autoplay = true; pip.muted = true; pip.playsInline = true;
-        pip.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;width:320px;border-radius:10px;box-shadow:0 4px 32px rgba(0,0,0,0.8);border:2px solid rgba(226,183,20,0.5);z-index:9998;background:#000;aspect-ratio:16/9;object-fit:cover;display:none;';
-        document.body.appendChild(pip);
+function getOrCreateVideoEl(camKey) {
+    const safeKey = camKey.replace(/[^a-z0-9]/gi, '_');
+    const id      = 'presv-' + safeKey;
+    let vid       = document.getElementById(id);
+    if (!vid) {
+        vid            = document.createElement('video');
+        vid.id         = id;
+        vid.autoplay   = true;
+        vid.muted      = true;
+        vid.playsInline = true;
+        getOrCreateOverlay().appendChild(vid);
     }
-    return pip;
+    return vid;
 }
 
+function getOrCreateOverlay() {
+    let el = document.getElementById('cam-overlay');
+    if (!el) {
+        el    = document.createElement('div');
+        el.id = 'cam-overlay';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+/**
+ * updateCamLayout — recalculates overlay position and video sizing
+ *   based on camConnections.size and fullscreenMode.
+ *
+ *   Modes:
+ *     fullscreen  → black, full-screen grid (1 col for 1 cam, 2 cols for 2+)
+ *     1 cam       → bottom-right PiP  320 px wide
+ *     2 cams      → bottom-right stacked PiPs  240 px wide
+ *     3-4 cams    → bottom-right stacked PiPs  200 px wide
+ */
+function updateCamLayout() {
+    const overlay = getOrCreateOverlay();
+    const count   = camConnections.size;
+
+    if (count === 0) {
+        overlay.style.cssText = 'display:none';
+        return;
+    }
+
+    if (fullscreenMode) {
+        const cols = count === 1 ? 1 : 2;
+        const rows = count > 2  ? 2 : 1;
+        overlay.style.cssText = `
+            position:fixed; inset:0; z-index:9998;
+            background:#000;
+            display:grid;
+            grid-template-columns:repeat(${cols},1fr);
+            grid-template-rows:repeat(${rows},1fr);
+            gap:2px;
+        `;
+        for (const [, conn] of camConnections) {
+            if (conn.videoEl)
+                conn.videoEl.style.cssText = `
+                    width:100%; height:100%;
+                    object-fit:cover; background:#000;
+                    border-radius:0; border:none; display:block;
+                `;
+        }
+    } else {
+        const w      = count === 1 ? '320px' : count === 2 ? '240px' : '200px';
+        const disp   = count === 1 ? 'block' : 'flex';
+        overlay.style.cssText = `
+            position:fixed;
+            bottom:calc(1.5rem + env(safe-area-inset-bottom));
+            right:1.5rem;
+            width:${w};
+            z-index:9998;
+            display:${disp};
+            flex-direction:column;
+            gap:6px;
+        `;
+        const border = count === 1
+            ? 'rgba(226,183,20,0.55)'
+            : 'rgba(226,183,20,0.3)';
+        const radius = count === 1 ? '10px' : '8px';
+        for (const [, conn] of camConnections) {
+            if (conn.videoEl)
+                conn.videoEl.style.cssText = `
+                    width:100%; aspect-ratio:16/9;
+                    object-fit:cover; background:#000;
+                    border-radius:${radius};
+                    border:2px solid ${border};
+                    box-shadow:0 4px 32px rgba(0,0,0,0.8);
+                    display:block;
+                `;
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  UTILITY
+// ══════════════════════════════════════════════════════════════════════════════
 function esc(s) {
-    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 connect();

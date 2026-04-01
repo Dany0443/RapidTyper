@@ -1,4 +1,3 @@
-
 'use strict';
 
 const WebSocket  = require('ws');
@@ -70,6 +69,7 @@ const FILES = {
 const schoolNodes             = new Map();  // schoolId → node
 const allCameras              = new Map();  // `schoolId::camId` → cam info
 const presentationAssignments = new Map();  // wsId → { schoolId, camId, camKey }
+const presentationMultiCams   = new Map();  // presId → [{ schoolId, camId, camKey }, ...]
 let   wsIdCounter = 0;
 const nextWsId = () => 'ws_' + (++wsIdCounter);
 
@@ -125,6 +125,17 @@ function getOrCreateVirtualClient(lcid, nodeWs, schoolId) {
 //  LOGGER
 // ══════════════════════════════════════════════════════════════════════════
 const logger = new Logger(DIRS.logs);
+// ── Compatibility shim — works with both old and new logger ──────────────────
+if (!logger.banner) logger.banner = (name, ver) => logger.info(`=== ${name} v${ver} started ===`);
+if (!logger.cam)    logger.cam    = m => logger.info(m);
+if (!logger.school) logger.school = m => logger.info(m);
+if (!logger.net)    logger.net    = m => logger.info(m);
+if (!logger.game)   logger.game   = m => logger.info(m);
+if (!logger.rec)    logger.rec    = m => logger.info(m);
+if (!logger.http)   logger.http   = m => logger.info(m);
+if (!logger.ws)     logger.ws     = m => logger.info(m);
+if (!logger.sep)    logger.sep    = () => {};
+if (!logger.statusBlock) logger.statusBlock = rows => rows.forEach(r => r && r.key ? logger.info(`${String(r.key).padEnd(18)}${r.val}`) : null);
 function sysLog(m) { logger.info(m); }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -363,7 +374,16 @@ function getPresentationAssignments() {
 
 function findViewerByViewerId(vid) {
     if (!vid) return null;
-    for (const [ws] of gameState.state.players) if (ws._viewerId === vid) return ws;
+    for (const [ws] of gameState.state.players) {
+        // Single-cam legacy path
+        if (ws._viewerId === vid) return ws;
+        // Multi-cam: viewerId stored per-camKey in a Map
+        if (ws._viewerIds instanceof Map) {
+            for (const v of ws._viewerIds.values()) {
+                if (v === vid) return ws;
+            }
+        }
+    }
     return null;
 }
 
@@ -657,9 +677,28 @@ async function handleMessage(ws, data) {
             gameState.state.players.set(ws, { role: 'viewer', username: 'Screen', wsId: presId });
             wsSend({
                 type: 'FULL_STATE_SYNC', state: gameState.getState(), wsId: presId,
-                cameras: getCamerasSummary(), schoolNodes: getSchoolNodesSummary()
+                cameras: getCamerasSummary(), schoolNodes: getSchoolNodesSummary(),
+                assignments: getPresentationAssignments(),
             });
-            broadcastLobbyState(); break;
+            // ── Re-assign cameras if this screen was previously on air ──────
+            const prevCams = (typeof presentationMultiCams !== 'undefined') ? presentationMultiCams.get(presId) : null;
+            if (prevCams && prevCams.length > 0) {
+                sysLog(`🖥️  Presentation ${presId} reconnected — re-assigning ${prevCams.length} cam(s)`);
+                prevCams.forEach((entry, idx) => {
+                    if (!ws._viewerIds) ws._viewerIds = new Map();
+                    if (!ws._viewingCams) ws._viewingCams = new Set();
+                    const viewerId = 'pres-' + presId + '-rv-' + nextWsId();
+                    ws._viewerIds.set(entry.camKey, viewerId);
+                    ws._viewingCams.add(entry.camKey);
+                    wsSend({ type: 'PRESENTATION_CAM_ADDED', schoolId: entry.schoolId, camId: entry.camId, camKey: entry.camKey, viewerId, slotIdx: idx, totalSlots: prevCams.length });
+                    const node = schoolNodes.get(entry.schoolId);
+                    if (node?.isVirtual) virtualHandleViewRequest(entry.camId, viewerId, ws);
+                    else if (node?.ws?.readyState === WebSocket.OPEN)
+                        node.ws.send(JSON.stringify({ type: 'VIEW_CAM_REQUEST', schoolId: entry.schoolId, camId: entry.camId, viewerId }));
+                });
+            }
+            broadcastLobbyState();
+            break;
         }
 
         case 'JOIN':
@@ -716,14 +755,47 @@ async function handleMessage(ws, data) {
         case 'SCHOOL_REGISTER': {
             const { schoolId, httpPort, localPort, videoPort, maxCams } = data;
             if (!schoolId) break;
-            // Store using the REAL ws (school node WS), not a VirtualClient
-            const realWs = ws instanceof VirtualClient ? ws._nodeWs : ws;
+
+            const realWs    = ws instanceof VirtualClient ? ws._nodeWs : ws;
+            const isReRegister = schoolNodes.has(schoolId);
+
+            if (isReRegister) {
+                // ── Stale-state cleanup on reconnect ──────────────────────
+                // 1. Purge all VirtualClients that belonged to this school
+                let vcPurged = 0;
+                for (const [lcid, vc] of virtualClients) {
+                    if (vc._schoolId === schoolId) {
+                        gameState.state.players.delete(vc);
+                        vc.readyState = WebSocket.CLOSED;
+                        virtualClients.delete(lcid);
+                        vcPurged++;
+                    }
+                }
+                // 2. Flush stale camera entries for this school
+                let camPurged = 0;
+                for (const [key, cam] of allCameras) {
+                    if (cam.schoolId === schoolId) { allCameras.delete(key); camPurged++; }
+                }
+                // 3. Remove old player entry (old ws may already be closed)
+                const oldNode = schoolNodes.get(schoolId);
+                if (oldNode?.ws && oldNode.ws !== realWs) {
+                    gameState.state.players.delete(oldNode.ws);
+                }
+                sysLog(`🏫 School RE-REGISTERED: ${schoolId}  (purged ${vcPurged} VCs, ${camPurged} cams)`);
+            } else {
+                sysLog(`🏫 School registered: ${schoolId}`);
+            }
+
             gameState.state.players.set(realWs, { role: 'school_node', schoolId, username: schoolId });
             realWs._wsId = realWs._wsId || nextWsId();
-            schoolNodes.set(schoolId, { ws: realWs, schoolId, httpPort, localPort, videoPort, maxCams, connectedAt: Date.now(), cameras: [] });
+            schoolNodes.set(schoolId, {
+                ws: realWs, schoolId, httpPort, localPort, videoPort, maxCams,
+                connectedAt: Date.now(), cameras: [],
+                reconnects: isReRegister ? ((schoolNodes.get(schoolId)?.reconnects || 0) + 1) : 0,
+            });
             realWs.send(JSON.stringify({ type: 'SCHOOL_REGISTER_OK', schoolId }));
-            sysLog(`🏫 School registered: ${schoolId}`);
             broadcast({ type: 'SCHOOL_NODES_UPDATE', nodes: getSchoolNodesSummary() });
+            // Camera state will arrive via SCHOOL_CAMERAS_UPDATE shortly after
             break;
         }
 
@@ -853,6 +925,79 @@ async function handleMessage(ws, data) {
             break;
         }
 
+        // ── Multi-cam: add one camera to all presentation screens ────────────
+        case 'HOST_ADD_CAM_TO_PRESENTATION': {
+            const p = gameState.state.players.get(ws); if (p?.role !== 'admin') break;
+            for (const [pws, pp] of gameState.state.players) {
+                if (pp.role !== 'viewer') continue;
+                const presId = pws._wsId || (pws._wsId = nextWsId());
+
+                if (!presentationMultiCams.has(presId)) presentationMultiCams.set(presId, []);
+                const cams = presentationMultiCams.get(presId);
+                if (cams.find(c => c.camKey === data.camKey)) continue; // already assigned
+
+                cams.push({ schoolId: data.schoolId, camId: data.camId, camKey: data.camKey });
+
+                if (!pws._viewerIds) pws._viewerIds = new Map();
+                if (!pws._viewingCams) pws._viewingCams = new Set();
+                const viewerId = 'pres-' + presId + '-' + nextWsId();
+                pws._viewerIds.set(data.camKey, viewerId);
+                pws._viewingCams.add(data.camKey);
+                // Keep legacy single field in sync for first cam
+                if (cams.length === 1) { pws._viewingCam = data.camKey; pws._viewerId = viewerId; }
+
+                const addMsg = JSON.stringify({
+                    type: 'PRESENTATION_CAM_ADDED',
+                    schoolId: data.schoolId, camId: data.camId, camKey: data.camKey,
+                    viewerId, slotIdx: cams.length - 1, totalSlots: cams.length,
+                });
+                if (pws instanceof VirtualClient) pws.send(addMsg);
+                else if (pws.readyState === WebSocket.OPEN) pws.send(addMsg);
+
+                // Ask school to start streaming to this viewer
+                const node = schoolNodes.get(data.schoolId);
+                if (node?.isVirtual) virtualHandleViewRequest(data.camId, viewerId, pws);
+                else if (node?.ws?.readyState === WebSocket.OPEN)
+                    node.ws.send(JSON.stringify({ type: 'VIEW_CAM_REQUEST', schoolId: data.schoolId, camId: data.camId, viewerId }));
+            }
+            broadcast({ type: 'PRESENTATION_ASSIGNMENTS', assignments: getPresentationAssignments() });
+            break;
+        }
+
+        // ── Multi-cam: remove one camera from all presentation screens ────────
+        case 'HOST_REMOVE_CAM_FROM_PRES': {
+            const p = gameState.state.players.get(ws); if (p?.role !== 'admin') break;
+            for (const [pws, pp] of gameState.state.players) {
+                if (pp.role !== 'viewer') continue;
+                pws._viewingCams?.delete(data.camKey);
+                pws._viewerIds?.delete(data.camKey);
+                if (pws._viewingCam === data.camKey) pws._viewingCam = null;
+                const presId = pws._wsId;
+                if (presId && presentationMultiCams.has(presId)) {
+                    const updated = presentationMultiCams.get(presId).filter(c => c.camKey !== data.camKey);
+                    updated.length ? presentationMultiCams.set(presId, updated) : presentationMultiCams.delete(presId);
+                }
+                const msg = JSON.stringify({ type: 'PRESENTATION_CAM_REMOVED', camKey: data.camKey });
+                if (pws instanceof VirtualClient) pws.send(msg);
+                else if (pws.readyState === WebSocket.OPEN) pws.send(msg);
+            }
+            for (const [pid, a] of presentationAssignments) if (a.camKey === data.camKey) presentationAssignments.delete(pid);
+            broadcast({ type: 'PRESENTATION_ASSIGNMENTS', assignments: getPresentationAssignments() });
+            break;
+        }
+
+        // ── Fullscreen toggle — broadcast to all presentation viewers ─────────
+        case 'HOST_PRESENTATION_FULLSCREEN': {
+            const p = gameState.state.players.get(ws); if (p?.role !== 'admin') break;
+            const msg = JSON.stringify({ type: 'PRESENTATION_FULLSCREEN', enabled: !!data.enabled });
+            for (const [pws, pp] of gameState.state.players) {
+                if (pp.role !== 'viewer') continue;
+                if (pws instanceof VirtualClient) pws.send(msg);
+                else if (pws.readyState === WebSocket.OPEN) pws.send(msg);
+            }
+            break;
+        }
+
         case 'RECORDING_START':
         case 'RECORDING_STOP': {
             const p = gameState.state.players.get(ws); if (p?.role !== 'admin') break;
@@ -867,20 +1012,48 @@ async function handleMessage(ws, data) {
         }
 
         case 'STREAM_ANSWER': {
-            if (!ws._viewingCam) break;
-            const [sid, cid] = ws._viewingCam.split('::');
+            // Resolve which school/cam this answer belongs to via viewerId
+            let sid, cid, resolvedViewerId;
+            resolvedViewerId = data.viewerId || ws._viewerId;
+
+            // Multi-cam path: reverse-lookup camKey from ws._viewerIds Map
+            if (ws._viewerIds instanceof Map && resolvedViewerId) {
+                for (const [camKey, vid] of ws._viewerIds) {
+                    if (vid === resolvedViewerId) {
+                        [sid, cid] = camKey.split('::');
+                        break;
+                    }
+                }
+            }
+            // Legacy single-cam fallback
+            if (!sid && ws._viewingCam) {
+                [sid, cid] = ws._viewingCam.split('::');
+            }
+            if (!sid || !cid) break;
             const node = schoolNodes.get(sid);
-            if (node?.isVirtual) break; // virtual cams don't do real WebRTC
-            if (node?.ws?.readyState === WebSocket.OPEN) node.ws.send(JSON.stringify({ type: 'SCHOOL_STREAM_ANSWER', schoolId: sid, camId: cid, sdp: data.sdp, viewerId: ws._viewerId }));
+            if (node?.isVirtual) break;
+            if (node?.ws?.readyState === WebSocket.OPEN)
+                node.ws.send(JSON.stringify({ type: 'SCHOOL_STREAM_ANSWER', schoolId: sid, camId: cid, sdp: data.sdp, viewerId: resolvedViewerId }));
             break;
         }
 
         case 'STREAM_ICE': {
-            if (!ws._viewingCam) break;
-            const [sid, cid] = ws._viewingCam.split('::');
+            const resolvedViewerId = data.viewerId || ws._viewerId;
+            let sid, cid;
+
+            // Multi-cam: reverse-lookup camKey from ws._viewerIds
+            if (ws._viewerIds instanceof Map && resolvedViewerId) {
+                for (const [camKey, vid] of ws._viewerIds) {
+                    if (vid === resolvedViewerId) { [sid, cid] = camKey.split('::'); break; }
+                }
+            }
+            // Legacy fallback
+            if (!sid && ws._viewingCam) { [sid, cid] = ws._viewingCam.split('::'); }
+            if (!sid || !cid) break;
             const node = schoolNodes.get(sid);
             if (node?.isVirtual) break;
-            if (node?.ws?.readyState === WebSocket.OPEN) node.ws.send(JSON.stringify({ type: 'SCHOOL_STREAM_ICE', schoolId: sid, camId: cid, candidate: data.candidate, viewerId: ws._viewerId }));
+            if (node?.ws?.readyState === WebSocket.OPEN)
+                node.ws.send(JSON.stringify({ type: 'SCHOOL_STREAM_ICE', schoolId: sid, camId: cid, candidate: data.candidate, viewerId: resolvedViewerId }));
             break;
         }
 
@@ -1348,32 +1521,33 @@ rl.on('line', async line => {
     if (cmd === 'stop')      await gracefulShutdown('stop');
     if (cmd === 'force-end' && gameState.state.phase === 'RACING') await endGame();
     if (cmd === 'status') {
-        const pp = [...gameState.state.players.values()];
+        const pp       = [...gameState.state.players.values()];
         const players  = pp.filter(p => p.role === 'player');
         const spellers = pp.filter(p => p.role === 'speller');
-        console.log('\n=== SERVER STATUS ===');
-        console.log(`Phase:       ${gameState.state.phase}`);
-        console.log(`Mode:        ${gameState.state.mode}`);
-        console.log(`Players:     ${players.length}`);
-        console.log(`Spellers:    ${spellers.length}`);
-        console.log(`State ver:   ${gameState.stateVersion}`);
-        console.log(`WS clients:  ${wss.clients.size}`);
-        console.log(`Schools:     ${schoolNodes.size}`);
-        console.log(`Cameras:     ${allCameras.size}`);
-        console.log(`VirtualCls:  ${virtualClients.size}`);
-        console.log(`Memory:      ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
-        console.log(`Uptime:      ${Math.floor(process.uptime() / 60)} minutes`);
-        console.log(`Debug:       ${DEBUG_MODE ? 'ON' : 'OFF'}`);
-        console.log(`Dev mode:    ${IS_DEV ? 'YES' : 'NO'}`);
+        const schools  = [...schoolNodes.values()].map(n =>
+            `${n.schoolId}:${n.ws?.readyState === 1 ? '🟢' : '🔴'}`
+        ).join('  ') || 'none';
+        logger.statusBlock([
+            { key: 'Phase',        val: gameState.state.phase, sub: `mode: ${gameState.state.mode}  v${gameState.stateVersion}` },
+            { key: 'Players',      val: players.length },
+            { key: 'Spellers',     val: spellers.length },
+            { key: 'WS clients',   val: wss.clients.size },
+            { key: 'Schools',      val: schoolNodes.size, sub: schools },
+            { key: 'Cameras',      val: allCameras.size },
+            { key: 'VirtualCls',   val: virtualClients.size },
+            { key: 'Memory',       val: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + ' MB' },
+            { key: 'Uptime',       val: Math.floor(process.uptime() / 60) + ' min' },
+            { key: 'Debug',        val: DEBUG_MODE ? '🟡 ON' : 'off' },
+            { key: 'Dev mode',     val: IS_DEV ? '🟡 YES' : 'no' },
+        ]);
         if (players.length > 0) {
-            console.log('\nPlayers:');
-            players.forEach(p => console.log(`  - ${p.username} (${p.grade}): ${p.wpm} CPM  ${p.progress || 0}%`));
+            logger.sep('players');
+            players.forEach(p => logger.info(`  ${p.username.padEnd(20)} ${p.grade}  ${p.wpm||0} CPM  ${p.progress||0}%`, 'GAME'));
         }
         if (spellers.length > 0) {
-            console.log('\nSpellers:');
-            spellers.forEach(p => console.log(`  - ${p.username} (${p.grade}): ${p.score}% acc`));
+            logger.sep('spellers');
+            spellers.forEach(p => logger.info(`  ${p.username.padEnd(20)} ${p.grade}  ${p.score||0}% acc`, 'GAME'));
         }
-        console.log('====================\n');
     }
     if (IS_DEV) {
         if (cmd.startsWith('cam add '))  { const [,,id,...r]=cmd.split(' '); startVirtualCamera(id||('c'+Date.now()), r.join(' ')||id); }
@@ -1405,16 +1579,27 @@ process.on('unhandledRejection', r => logger.error(`Rejection: ${r}`));
     gameState.state.text      = loadText();
     gameState.state.spellText = loadSpellText();
     const restored = await gameState.restoreLastState();
-    if (restored) sysLog('📄 Recovered from restart');
+
+    logger.banner('MainServer', '2.0', [
+        { key: 'WS port',     val: ':5889' },
+        { key: 'HTTP port',   val: ':5890' },
+        { key: 'env',         val: IS_DEV ? 'DEVELOPMENT' : 'production' },
+        '---',
+        { key: 'admin key',   val: (ADMIN_KEY || '').slice(0,2) + '****' },
+        { key: 'stream key',  val: (STREAM_KEY || '').slice(0,2) + '****' },
+        { key: 'max players', val: MAX_PLAYERS },
+        '---',
+        { key: 'static root', val: CLIENT_WEB },
+        { key: 'db',          val: FILES.mainDb },
+        { key: 'state',       val: restored ? '📄 restored from last save' : 'fresh start' },
+    ]);
 
     if (IS_DEV) {
         setupVirtualNode();
         setTimeout(() => {
             startVirtualCamera('dev-cam-1', 'Camera 1');
             startVirtualCamera('dev-cam-2', 'Camera 2');
-            sysLog('🔧 DEV: 2 virtual cameras started');
+            logger.cam('🔧 DEV: 2 virtual cameras started');
         }, 800);
     }
-
-    sysLog(`🚀 WS :5889  HTTP :5890  mode:${IS_DEV ? 'DEV' : 'PROD'}`);
 })();

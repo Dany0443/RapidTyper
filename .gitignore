@@ -147,3 +147,5 @@ data/
 db/
 LICENSE
 package-lock.json
+certs/
+recordings/

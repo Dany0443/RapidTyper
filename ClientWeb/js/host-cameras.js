@@ -2,30 +2,44 @@
  * host-cameras.js
  * Camera routing UI for host.html — loaded after host.js.
  *
- * Features:
- *  • Live JPEG thumbnail grid for all connected cameras
- *  • Click to assign any camera to all presentation screens
- *  • Per-camera Record / Stop recording buttons
- *  • Recordings browser — list + download from school server
- *  • School nodes status bar
- *  • Presentation screen assignment panel
- *  • WebRTC host preview (opens camera live in modal)
+ * Changes in this version:
+ *  • Thumbnail cache (thumbCache) — thumbnails survive grid re-renders
+ *  • Multi-camera support — host can assign N cameras to presentation
+ *  • HOST_ADD_CAM_TO_PRESENTATION / HOST_REMOVE_CAM_FROM_PRES message types
+ *  • Fullscreen command button (HOST_PRESENTATION_FULLSCREEN)
  */
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  STATE
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 const camState = {
-    cameras      : [],   // { key, camId, schoolId, label, streaming, recording, bytesWritten, recFilename }
-    nodes        : [],   // { schoolId, cameras, online, httpPort }
-    assignments  : {},   // presId → { schoolId, camId, camKey }
-    hostPreviewPc: null,
-    hostPreviewKey: null,
+    cameras         : [],   // { key, camId, schoolId, label, streaming, recording, bytesWritten, recFilename }
+    nodes           : [],   // { schoolId, cameras, online, httpPort }
+    assignments     : {},   // presId → { schoolId, camId, camKey }   (server state, single-cam compat)
+    assignedCamKeys : new Set(), // camKeys currently assigned to presentation (multi-cam local state)
+    hostPreviewPc   : null,
+    hostPreviewKey  : null,
 };
 
-// ══════════════════════════════════════════════════════════════════════════
+let isPresFullscreen = false;
+
+// ── Thumbnail cache: survives renderCameraGrid() rebuilds ──────────────────
+// Map<safeKey, dataURI>
+const thumbCache = new Map();
+
+function applyThumb(safeKey, src) {
+    const img = document.getElementById('thumb-' + safeKey);
+    if (!img) return;
+    img.src          = src;
+    img.style.display = 'block';
+    img.onerror      = () => { img.style.display = 'none'; };
+    const ph = document.getElementById('ph-' + safeKey);
+    if (ph) ph.style.display = 'none';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  HOOK INTO host.js message handler
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 const _origHandleMessage = window.handleMessage || (() => {});
 window.handleMessage = function(data) {
     _origHandleMessage(data);
@@ -49,10 +63,11 @@ function handleCameraMessage(data) {
 
         case 'PRESENTATION_ASSIGNMENTS':
             camState.assignments = data.assignments || {};
+            // Sync assignedCamKeys from server state (single-cam assignments)
+            // Multi-cam assignments are tracked locally via assignedCamKeys
             renderPresAssignments();
             break;
 
-        // Server confirmed recording started/stopped on a camera
         case 'RECORDING_STATE_CHANGED': {
             const cam = camState.cameras.find(c => c.key === data.camKey);
             if (cam) {
@@ -64,47 +79,47 @@ function handleCameraMessage(data) {
             break;
         }
 
-        // Thumbnail arrives — update grid.
-        // data.jpeg can be:
-        //   raw base64 JPEG string  → prepend  data:image/jpeg;base64,
-        //   full data URI           → use as-is (dev virtual cams send data:image/svg+xml;...)
+        // ── Thumbnail received ─────────────────────────────────────────────
+        // data.jpeg is either:
+        //   a full data URI (dev virtual cams: "data:image/svg+xml;...")
+        //   raw base64 JPEG string (real school cameras)
         case 'CAM_THUMBNAIL': {
+            if (!data.jpeg) break;
             const safeKey = (data.camKey || '').replace(/[^a-z0-9]/gi, '_');
-            const img     = document.getElementById('thumb-' + safeKey);
-            if (img && data.jpeg) {
-                img.src = data.jpeg.startsWith('data:') ? data.jpeg : 'data:image/jpeg;base64,' + data.jpeg;
-                img.style.display = 'block';
-                const ph = document.getElementById('ph-' + safeKey);
-                if (ph) ph.style.display = 'none';
-            }
+            const src     = data.jpeg.startsWith('data:')
+                ? data.jpeg
+                : 'data:image/jpeg;base64,' + data.jpeg;
+
+            // Always cache — so re-renders can re-apply
+            thumbCache.set(safeKey, src);
+            applyThumb(safeKey, src);
             break;
         }
 
         case 'FULL_STATE_SYNC':
         case 'AUTH_SUCCESS':
-            if (data.cameras)    { camState.cameras = data.cameras;    renderCameraGrid(); }
+            if (data.cameras)    { camState.cameras = data.cameras;    renderCameraGrid();  }
             if (data.schoolNodes){ camState.nodes   = data.schoolNodes; renderSchoolNodes(); }
+            if (data.assignments){ camState.assignments = data.assignments; renderPresAssignments(); }
             updateCamBadge();
             break;
 
         // WebRTC signaling for host live preview
         case 'STREAM_OFFER':
-            if (camState.hostPreviewPc && data.camKey === camState.hostPreviewKey) {
+            if (camState.hostPreviewPc && data.camKey === camState.hostPreviewKey)
                 answerPreviewOffer(data.sdp, data.viewerId);
-            }
             break;
 
         case 'STREAM_ICE_FROM_CAM':
-            if (camState.hostPreviewPc && data.camKey === camState.hostPreviewKey) {
+            if (camState.hostPreviewPc && data.camKey === camState.hostPreviewKey)
                 camState.hostPreviewPc.addIceCandidate(data.candidate).catch(() => {});
-            }
             break;
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  TAB SWITCH EXTENSION
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 const _origSwitchView = window.switchView;
 window.switchView = function(viewName) {
     _origSwitchView(viewName);
@@ -119,9 +134,9 @@ window.switchView = function(viewName) {
     }
 };
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  RENDER — SCHOOL NODES
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 function renderSchoolNodes() {
     const el      = document.getElementById('school-nodes-list');
     const countEl = document.getElementById('nodes-count');
@@ -151,9 +166,9 @@ function renderSchoolNodes() {
     `).join('');
 }
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  RENDER — CAMERA GRID
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 function renderCameraGrid() {
     const el          = document.getElementById('cam-grid');
     const streamCount = document.getElementById('streaming-count');
@@ -175,17 +190,22 @@ function renderCameraGrid() {
 
     el.innerHTML = camState.cameras.map(cam => {
         const safeKey    = cam.key.replace(/[^a-z0-9]/gi, '_');
-        const isAssigned = Object.values(camState.assignments).some(a => a.camKey === cam.key);
+        const isAssigned = camState.assignedCamKeys.has(cam.key);
         const sizeMB     = cam.bytesWritten ? (cam.bytesWritten / 1024 / 1024).toFixed(1) : '0';
 
         return `
         <div class="cam-card ${cam.streaming ? 'streaming' : ''} ${isAssigned ? 'assigned' : ''} ${cam.recording ? 'recording-active' : ''}"
              id="camcard-${safeKey}">
 
-            <!-- Thumbnail / placeholder -->
             ${cam.streaming ? `
-                <img  id="thumb-${safeKey}" class="cam-thumb" src="" alt="cam" style="display:none">
-                <div  id="ph-${safeKey}"    class="cam-thumb-placeholder">
+                <!-- Thumbnail: hidden until first frame arrives; cache re-applies it -->
+                <img  id="thumb-${safeKey}"
+                      class="cam-thumb"
+                      src=""
+                      alt="${esc(cam.label || cam.camId)}"
+                      style="display:none"
+                      draggable="false">
+                <div  id="ph-${safeKey}" class="cam-thumb-placeholder">
                     <i class="fa-solid fa-circle-notch fa-spin" style="font-size:1.5rem"></i>
                 </div>
             ` : `
@@ -194,14 +214,12 @@ function renderCameraGrid() {
                 </div>
             `}
 
-            <!-- Recording badge overlay -->
             ${cam.recording ? `
                 <div class="cam-rec-badge">
                     <span class="rec-dot"></span> REC ${sizeMB}MB
                 </div>
             ` : ''}
 
-            <!-- Footer -->
             <div class="cam-footer">
                 <div class="${cam.streaming ? 'cam-live-dot' : 'cam-offline-dot'}"></div>
                 <div class="cam-info">
@@ -211,14 +229,11 @@ function renderCameraGrid() {
 
                 ${cam.streaming ? `
                 <div class="cam-actions">
-                    <!-- Assign to presentation -->
                     <button id="assign-btn-${safeKey}"
                             class="cam-assign-btn ${isAssigned ? 'active-assign' : ''}"
                             onclick="toggleAssignCam('${esc(cam.schoolId)}','${esc(cam.camId)}','${esc(cam.key)}','${safeKey}')">
-                        ${isAssigned ? '✓ Prezentare' : '📺 Prezentare'}
+                        ${isAssigned ? '✓ Pe Ecran' : '📺 Pe Ecran'}
                     </button>
-
-                    <!-- Record / Stop -->
                     ${cam.recording ? `
                         <button id="rec-btn-${safeKey}"
                                 class="cam-assign-btn rec-stop-btn"
@@ -232,8 +247,6 @@ function renderCameraGrid() {
                             🔴 Record
                         </button>
                     `}
-
-                    <!-- Host preview -->
                     <button class="cam-assign-btn"
                             onclick="openHostPreview('${esc(cam.schoolId)}','${esc(cam.camId)}','${esc(cam.key)}')">
                         👁️ Preview
@@ -243,25 +256,45 @@ function renderCameraGrid() {
             </div>
         </div>`;
     }).join('');
+
+    // ── Re-apply cached thumbnails after DOM rebuild ───────────────────────
+    for (const [safeKey, src] of thumbCache) {
+        applyThumb(safeKey, src);
+    }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  RENDER — PRESENTATION ASSIGNMENTS
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 function renderPresAssignments() {
     const el      = document.getElementById('pres-assignments-list');
     const countEl = document.getElementById('pres-count');
     if (!el) return;
 
-    const keys = Object.keys(camState.assignments);
-    if (countEl) countEl.textContent = `${keys.length} connected`;
+    const assignedCount = camState.assignedCamKeys.size;
+    const presCount     = Object.keys(camState.assignments).length;
+    if (countEl) countEl.textContent =
+        `${presCount} screen${presCount !== 1 ? 's' : ''} · ${assignedCount} cam${assignedCount !== 1 ? 's' : ''} on air`;
 
-    if (!keys.length) {
-        el.innerHTML = '<div class="cam-empty-msg">No presentation screens connected.</div>';
+    const keys = Object.keys(camState.assignments);
+
+    // Fullscreen control row (always show if any presentation is connected)
+    const fsRow = `
+        <div class="pres-row" style="justify-content:space-between;margin-bottom:0.5rem">
+            <div class="text-xs font-bold" style="color:var(--sub)">PRESENTATION CONTROLS</div>
+            <button id="fullscreen-toggle-btn"
+                    class="cam-assign-btn ${isPresFullscreen ? 'active-assign' : ''}"
+                    onclick="togglePresFullscreen()">
+                ${isPresFullscreen ? '⛶ Exit Fullscreen' : '⛶ Fullscreen'}
+            </button>
+        </div>`;
+
+    if (!keys.length && assignedCount === 0) {
+        el.innerHTML = fsRow + '<div class="cam-empty-msg">No presentation screens connected.</div>';
         return;
     }
 
-    el.innerHTML = keys.map(presId => {
+    const presRows = keys.map(presId => {
         const a = camState.assignments[presId];
         return `
         <div class="pres-row">
@@ -274,34 +307,83 @@ function renderPresAssignments() {
             }
         </div>`;
     }).join('');
+
+    // Show assigned cam keys (multi-cam list)
+    const camList = assignedCount > 0
+        ? `<div class="pres-row" style="flex-wrap:wrap;gap:0.35rem">
+               <div class="text-xs font-bold" style="color:var(--sub);width:100%;margin-bottom:0.2rem">
+                   CAMS ON AIR (${assignedCount})
+               </div>
+               ${[...camState.assignedCamKeys].map(k => {
+                   const cam = camState.cameras.find(c => c.key === k);
+                   const lbl = cam ? esc(cam.label || cam.camId) : esc(k);
+                   return `<span class="status-pill pill-green" style="cursor:pointer"
+                                 onclick="removeAssignedCam('${esc(k)}')"
+                                 title="Click to remove from presentation">
+                               📺 ${lbl} ✕
+                           </span>`;
+               }).join('')}
+           </div>`
+        : '';
+
+    el.innerHTML = fsRow + camList + presRows;
 }
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  BADGE
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 function updateCamBadge() {
     const b = document.getElementById('cam-count-badge');
     if (b) b.textContent = camState.cameras.length;
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-//  PRESENTATION ASSIGNMENT
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+//  MULTI-CAM ASSIGNMENT
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * toggleAssignCam — adds or removes a camera from the live presentation feed.
+ *   Uses new HOST_ADD_CAM_TO_PRESENTATION / HOST_REMOVE_CAM_FROM_PRES messages.
+ *   Server must handle these (see server-patch.js).
+ */
 function toggleAssignCam(schoolId, camId, camKey, safeKey) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-    const btn        = document.getElementById('assign-btn-' + safeKey);
-    const isAssigned = Object.values(camState.assignments).some(a => a.camKey === camKey);
-
-    if (isAssigned) {
-        ws.send(JSON.stringify({ type: 'HOST_UNASSIGN_CAM', camKey, schoolId, camId }));
-        if (btn) { btn.classList.remove('active-assign'); btn.textContent = '📺 Prezentare'; }
+    if (camState.assignedCamKeys.has(camKey)) {
+        // Remove from presentation
+        ws.send(JSON.stringify({ type: 'HOST_REMOVE_CAM_FROM_PRES', camKey, schoolId, camId }));
+        camState.assignedCamKeys.delete(camKey);
         hostToast(`Camera ${camId} removed from presentation`);
     } else {
-        ws.send(JSON.stringify({ type: 'HOST_ASSIGN_CAM_TO_PRESENTATION', schoolId, camId, camKey }));
-        if (btn) { btn.classList.add('active-assign'); btn.textContent = '✓ Prezentare'; }
-        hostToast(`Camera ${camId} → all presentations`);
+        // Add to presentation
+        ws.send(JSON.stringify({ type: 'HOST_ADD_CAM_TO_PRESENTATION', schoolId, camId, camKey }));
+        camState.assignedCamKeys.add(camKey);
+        hostToast(`Camera ${camId} → presentation (${camState.assignedCamKeys.size} total)`);
     }
+
+    // Update the button immediately (optimistic)
+    const btn = document.getElementById('assign-btn-' + safeKey);
+    const isNowAssigned = camState.assignedCamKeys.has(camKey);
+    if (btn) {
+        btn.classList.toggle('active-assign', isNowAssigned);
+        btn.textContent = isNowAssigned ? '✓ Pe Ecran' : '📺 Pe Ecran';
+    }
+    const card = document.getElementById('camcard-' + safeKey);
+    if (card) card.classList.toggle('assigned', isNowAssigned);
+
+    renderPresAssignments();
+}
+
+function removeAssignedCam(camKey) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const cam = camState.cameras.find(c => c.key === camKey);
+    const camId    = cam?.camId    || camKey.split('::')[1] || camKey;
+    const schoolId = cam?.schoolId || camKey.split('::')[0] || '';
+    ws.send(JSON.stringify({ type: 'HOST_REMOVE_CAM_FROM_PRES', camKey, schoolId, camId }));
+    camState.assignedCamKeys.delete(camKey);
+    hostToast(`Camera ${camId} removed`);
+    renderCameraGrid();
+    renderPresAssignments();
 }
 
 function unassignPresentation(presId) {
@@ -311,15 +393,29 @@ function unassignPresentation(presId) {
     renderPresAssignments();
 }
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+//  FULLSCREEN COMMAND
+// ══════════════════════════════════════════════════════════════════════════════
+function togglePresFullscreen() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    isPresFullscreen = !isPresFullscreen;
+    ws.send(JSON.stringify({ type: 'HOST_PRESENTATION_FULLSCREEN', enabled: isPresFullscreen }));
+    hostToast(isPresFullscreen ? '⛶ Presentation → Fullscreen' : '⛶ Presentation → PiP');
+
+    const btn = document.getElementById('fullscreen-toggle-btn');
+    if (btn) {
+        btn.classList.toggle('active-assign', isPresFullscreen);
+        btn.textContent = isPresFullscreen ? '⛶ Exit Fullscreen' : '⛶ Fullscreen';
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  RECORDING CONTROLS
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 function startCamRecording(schoolId, camId) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: 'RECORDING_START', schoolId, camId }));
     hostToast(`🔴 Recording started: ${camId}`);
-
-    // Optimistic UI
     const cam = camState.cameras.find(c => c.camId === camId && c.schoolId === schoolId);
     if (cam) { cam.recording = true; renderCameraGrid(); }
 }
@@ -328,7 +424,6 @@ function stopCamRecording(schoolId, camId) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: 'RECORDING_STOP', schoolId, camId }));
     hostToast(`⏹ Recording stopped: ${camId}`);
-
     const cam = camState.cameras.find(c => c.camId === camId && c.schoolId === schoolId);
     if (cam) { cam.recording = false; renderCameraGrid(); }
 }
@@ -338,7 +433,6 @@ function updateCamCardRecordingState(camKey, recording) {
     const card    = document.getElementById('camcard-' + safeKey);
     if (!card) return;
     card.classList.toggle('recording-active', recording);
-    // Rebuild just the rec button
     const btn = document.getElementById('rec-btn-' + safeKey);
     if (!btn) return;
     const [schoolId, camId] = camKey.split('::');
@@ -353,10 +447,9 @@ function updateCamCardRecordingState(camKey, recording) {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  RECORDINGS BROWSER MODAL
-//  Fetches from school server HTTP :httpPort/recordings
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 let _recBrowserSchoolId = null;
 let _recBrowserHttpPort = 8080;
 
@@ -397,8 +490,6 @@ function refreshRecordingsList() {
     if (!el) return;
     el.innerHTML = '<div class="cam-empty-msg">Loading...</div>';
 
-    // Determine school server IP from the WS URL or fall back to current host
-    // In practice the school server runs on the same machine as the WS it connected from
     const schoolHttpUrl = getSchoolHttpUrl(_recBrowserHttpPort);
 
     fetch(`${schoolHttpUrl}/recordings`)
@@ -440,17 +531,13 @@ function closeRecordingsBrowser() {
 }
 
 function getSchoolHttpUrl(httpPort) {
-    // If we're on the main server, the school server could be on Tailscale.
-    // We can't reliably know the school server's IP from here — so we expose
-    // a proxy endpoint on the main server: /school-proxy/:schoolId/recordings
-    // For now we try the same hostname as the WS server but with httpPort.
     const base = location.protocol + '//' + location.hostname;
     return `${base}:${httpPort}`;
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-//  HOST LIVE PREVIEW  (WebRTC)
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+//  HOST LIVE PREVIEW  (WebRTC — single cam modal, unchanged)
+// ══════════════════════════════════════════════════════════════════════════════
 function openHostPreview(schoolId, camId, camKey) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     closeHostPreview();
@@ -459,7 +546,7 @@ function openHostPreview(schoolId, camId, camKey) {
 
     const pc = new RTCPeerConnection({
         iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun.l.google.com:19302'  },
             { urls: 'stun:stun1.l.google.com:19302' },
         ],
     });
@@ -471,20 +558,17 @@ function openHostPreview(schoolId, camId, camKey) {
     };
 
     pc.onicecandidate = e => {
-        if (e.candidate && ws.readyState === WebSocket.OPEN) {
+        if (e.candidate && ws.readyState === WebSocket.OPEN)
             ws.send(JSON.stringify({ type: 'STREAM_ICE', candidate: e.candidate }));
-        }
     };
 
     pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected')
             closeHostPreview();
-        }
     };
 
     ws.send(JSON.stringify({ type: 'HOST_VIEW_CAM', schoolId, camId, camKey }));
 
-    // Show modal
     let modal = document.getElementById('host-preview-modal');
     if (!modal) {
         modal = document.createElement('div');
@@ -506,7 +590,6 @@ function openHostPreview(schoolId, camId, camKey) {
     modal.style.display = 'flex';
     document.getElementById('preview-modal-title').textContent = `${camId} (${schoolId})`;
 
-    // Update status on state change
     pc.addEventListener('connectionstatechange', () => {
         const s = document.getElementById('preview-status');
         if (s) s.textContent = pc.connectionState;
@@ -519,14 +602,13 @@ async function answerPreviewOffer(sdp, viewerId) {
     await pc.setRemoteDescription({ type: 'offer', sdp });
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'STREAM_ANSWER', sdp: answer.sdp, viewerId }));
-    }
 }
 
 function closeHostPreview() {
     if (camState.hostPreviewPc) {
-        try { camState.hostPreviewPc.close(); } catch (e) {}
+        try { camState.hostPreviewPc.close(); } catch (_) {}
         camState.hostPreviewPc  = null;
         camState.hostPreviewKey = null;
     }
@@ -536,14 +618,14 @@ function closeHostPreview() {
     if (vid) vid.srcObject = null;
 }
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  TOAST
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 let _toastTimer = null;
 function hostToast(msg) {
     let t = document.getElementById('_host_cam_toast');
     if (!t) {
-        t = document.createElement('div');
+        t    = document.createElement('div');
         t.id = '_host_cam_toast';
         t.style.cssText = [
             'position:fixed', 'bottom:1.5rem', 'left:50%',
@@ -556,19 +638,19 @@ function hostToast(msg) {
         ].join(';');
         document.body.appendChild(t);
     }
-    t.textContent = msg;
+    t.textContent   = msg;
     t.style.opacity = '1';
     if (_toastTimer) clearTimeout(_toastTimer);
     _toastTimer = setTimeout(() => { t.style.opacity = '0'; }, 2800);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-//  INLINE STYLES  (injected once so host.html stays clean)
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+//  INLINE STYLES
+// ══════════════════════════════════════════════════════════════════════════════
 (function injectStyles() {
     const s = document.createElement('style');
     s.textContent = `
-        /* ── Camera grid layout ── */
+        /* ── Camera grid ── */
         .cam-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:0.85rem; }
         .cam-empty-msg { text-align:center; padding:2rem 1rem; color:var(--sub); font-size:0.8rem; }
 
@@ -578,17 +660,22 @@ function hostToast(msg) {
             border:2px solid rgba(255,255,255,0.06);
             overflow:hidden; transition:border-color 0.2s; position:relative;
         }
-        .cam-card.streaming    { border-color:#22c55e55; }
-        .cam-card.assigned     { border-color:var(--main); }
+        .cam-card.streaming      { border-color:#22c55e55; }
+        .cam-card.assigned       { border-color:var(--main); box-shadow:0 0 12px rgba(226,183,20,0.15); }
         .cam-card.recording-active { border-color:#ca4754; }
 
-        .cam-thumb { width:100%; aspect-ratio:16/9; object-fit:cover; display:block; background:#111; }
+        /* ── Thumbnail ── */
+        .cam-thumb {
+            width:100%; aspect-ratio:16/9; object-fit:cover;
+            display:block; background:#111;
+        }
         .cam-thumb-placeholder {
             width:100%; aspect-ratio:16/9; background:#1a1b1d;
             display:flex; align-items:center; justify-content:center;
             color:var(--sub); font-size:2rem;
         }
 
+        /* ── Recording badge overlay ── */
         .cam-rec-badge {
             position:absolute; top:6px; left:8px;
             background:rgba(202,71,84,0.85); color:#fff;
@@ -602,6 +689,7 @@ function hostToast(msg) {
         }
         @keyframes recblink { 0%,100%{opacity:1} 50%{opacity:0.2} }
 
+        /* ── Card footer ── */
         .cam-footer { padding:0.55rem 0.7rem; display:flex; align-items:center; gap:0.5rem; }
         .cam-live-dot    { width:7px; height:7px; border-radius:50%; background:#22c55e; animation:recblink 1.2s infinite; flex-shrink:0; }
         .cam-offline-dot { width:7px; height:7px; border-radius:50%; background:var(--sub); flex-shrink:0; }
@@ -610,6 +698,7 @@ function hostToast(msg) {
         .cam-school{ font-size:0.6rem; color:var(--sub); letter-spacing:0.05em; }
         .cam-actions { display:flex; flex-direction:column; gap:3px; align-items:flex-end; }
 
+        /* ── Buttons (camera panel) ── */
         .cam-assign-btn {
             padding:0.22rem 0.55rem; border-radius:5px;
             border:1px solid var(--sub); background:transparent; color:var(--sub);
@@ -620,7 +709,7 @@ function hostToast(msg) {
         .cam-assign-btn.active-assign { border-color:var(--main); color:var(--bg); background:var(--main); }
         .cam-assign-btn.rec-start-btn { border-color:#ca4754; color:#ca4754; }
         .cam-assign-btn.rec-start-btn:hover { background:#ca4754; color:#fff; }
-        .cam-assign-btn.rec-stop-btn { border-color:#ca4754; color:#fff; background:#ca4754; }
+        .cam-assign-btn.rec-stop-btn  { border-color:#ca4754; color:#fff; background:#ca4754; }
 
         /* ── School node row ── */
         .school-node-row {
@@ -654,7 +743,7 @@ function hostToast(msg) {
         }
         .cam-modal {
             background:var(--card); border-radius:12px; padding:1.25rem;
-            max-width:700px; width:94vw; max-height:90vh;
+            max-width:700px; width:94vw; max-height:90vh; overflow-y:auto;
             border:1px solid rgba(255,255,255,0.08);
         }
         .cam-modal-header {
@@ -666,9 +755,9 @@ function hostToast(msg) {
     document.head.appendChild(s);
 })();
 
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 //  UTIL
-// ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 function esc(s) {
     return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }

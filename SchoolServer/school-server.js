@@ -54,6 +54,17 @@ const Logger = require('../shared/logger');
 //  LOGGING
 // ══════════════════════════════════════════════════════════════════════════
 const logger = new Logger(path.join(__dirname, 'logs'));
+// ── Compatibility shim — works with both old and new logger ──────────────────
+if (!logger.banner) logger.banner = (name, ver) => logger.info(`=== ${name} v${ver} started ===`);
+if (!logger.cam)    logger.cam    = m => logger.info(m);
+if (!logger.school) logger.school = m => logger.info(m);
+if (!logger.net)    logger.net    = m => logger.info(m);
+if (!logger.game)   logger.game   = m => logger.info(m);
+if (!logger.rec)    logger.rec    = m => logger.info(m);
+if (!logger.http)   logger.http   = m => logger.info(m);
+if (!logger.ws)     logger.ws     = m => logger.info(m);
+if (!logger.sep)    logger.sep    = () => {};
+if (!logger.statusBlock) logger.statusBlock = rows => rows.forEach(r => r && r.key ? logger.info(`${String(r.key).padEnd(18)}${r.val}`) : null);
 const log  = msg => logger.info(msg);
 const warn = msg => logger.warn(msg);
 const err  = msg => logger.error(msg);
@@ -212,17 +223,36 @@ let mainWs                = null;
 let mainConnected         = false;
 let mainReconnectAttempts = 0;
 let mainReconnectTimer    = null;
+let _lastMainMsg          = 0;     // epoch ms of last received message
+let _heartbeatTimer       = null;
+let _regConfirmTimer      = null;  // fires if SCHOOL_REGISTER_OK not received in time
+
+// Queue: VIEW_CAM_REQUEST that arrived before the camera's videoWs was ready
+// Map<camId, Array<{ viewerId, queuedAt }>>
+const pendingViewerQueue = new Map();
 
 function connectToMain() {
     if (mainReconnectTimer) { clearTimeout(mainReconnectTimer); mainReconnectTimer = null; }
-    log(`🔗 Connecting to MainServer: ${CFG.mainServerWs}`);
+
+    const attempt = mainReconnectAttempts;
+    if (attempt > 0) {
+        logger.net(`🔁 Reconnect attempt #${attempt} → ${CFG.mainServerWs}`);
+    } else {
+        logger.net(`🔗 Connecting to MainServer: ${CFG.mainServerWs}`);
+    }
+
     try { mainWs = new WebSocket(CFG.mainServerWs); }
-    catch (e) { scheduleMainReconnect(); return; }
+    catch (e) { warn(`MainServer WS create error: ${e.message}`); scheduleMainReconnect(); return; }
 
     mainWs.on('open', () => {
         mainConnected         = true;
         mainReconnectAttempts = 0;
-        log('✅ Connected to MainServer');
+        _lastMainMsg          = Date.now();
+        log(`✅ Connected to MainServer`);
+
+        _startHeartbeat();
+
+        // Send registration
         safeSendMain({
             type     : 'SCHOOL_REGISTER',
             schoolId : CFG.schoolId,
@@ -231,40 +261,83 @@ function connectToMain() {
             videoPort: CFG.videoPort,
             maxCams  : CFG.maxCams,
         });
-        notifyMainCameraState();
+
+        // If SCHOOL_REGISTER_OK not received in 5s, log a warning
+        if (_regConfirmTimer) clearTimeout(_regConfirmTimer);
+        _regConfirmTimer = setTimeout(() => {
+            if (mainConnected) {
+                warn(`⚠️  No SCHOOL_REGISTER_OK after 5s — MainServer may not have accepted registration`);
+                // Retry registration once
+                safeSendMain({
+                    type: 'SCHOOL_REGISTER', schoolId: CFG.schoolId,
+                    httpPort: CFG.httpPort, localPort: CFG.localPort,
+                    videoPort: CFG.videoPort, maxCams: CFG.maxCams,
+                });
+            }
+        }, 5000);
+
+        // Delay camera-state broadcast by 300ms to give MainServer time to process SCHOOL_REGISTER
+        setTimeout(notifyMainCameraState, 300);
     });
 
     mainWs.on('message', raw => {
+        _lastMainMsg = Date.now();
         if (raw instanceof Buffer && raw[0] !== 0x7b) return;
         let msg;
         try { msg = JSON.parse(raw.toString()); } catch { return; }
         handleMainMessage(msg);
     });
 
-    mainWs.on('close', () => {
+    mainWs.on('close', (code, reason) => {
         mainConnected = false;
-        warn('MainServer disconnected');
+        _stopHeartbeat();
+        const why = reason?.toString() || 'no reason';
+        warn(`📶 MainServer disconnected (code ${code}: ${why})`);
         scheduleMainReconnect();
     });
 
     mainWs.on('error', e => {
-        warn(`MainServer error: ${e.message}`);
+        warn(`📶 MainServer error: ${e.message}`);
         mainConnected = false;
+        // 'close' fires after 'error' — reconnect is handled there
     });
 }
 
 function scheduleMainReconnect() {
     if (mainReconnectTimer) return;
+    // Exponential backoff: 1s, 1.8s, 3.2s … capped at 30s
     const delay = Math.min(1000 * Math.pow(1.8, mainReconnectAttempts), 30000);
     mainReconnectAttempts++;
+    logger.net(`🔁 Will retry in ${(delay / 1000).toFixed(1)}s  (attempt #${mainReconnectAttempts})`);
     mainReconnectTimer = setTimeout(connectToMain, delay);
+}
+
+// ── Heartbeat: if main goes silent for 60s, force reconnect ──────────────────
+function _startHeartbeat() {
+    _stopHeartbeat();
+    _heartbeatTimer = setInterval(() => {
+        if (!mainConnected) return;
+        const silent = Date.now() - _lastMainMsg;
+        if (silent > 60_000) {
+            warn(`💔 MainServer silent for ${Math.round(silent / 1000)}s — forcing reconnect`);
+            try { mainWs.terminate(); } catch (_) {}
+            mainConnected = false;
+            _stopHeartbeat();
+            scheduleMainReconnect();
+        }
+    }, 15_000);
+}
+
+function _stopHeartbeat() {
+    if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
 }
 
 function handleMainMessage(msg) {
     switch (msg.type) {
 
         case 'SCHOOL_REGISTER_OK':
-            log(`✅ Registered with MainServer as "${CFG.schoolId}"`);
+            if (_regConfirmTimer) { clearTimeout(_regConfirmTimer); _regConfirmTimer = null; }
+            logger.school(`✅ Registered with MainServer as "${CFG.schoolId}"`);
             break;
 
         // Host wants to view a camera live (WebRTC)
@@ -333,11 +406,42 @@ function handleViewCamRequest(camId, viewerId) {
     const cam = cameras.get(camId);
     if (!cam) {
         safeSendMain({ type: 'CAM_NOT_FOUND', camId, schoolId: CFG.schoolId });
+        logger.cam(`⚠️  VIEW requested for unknown cam ${camId} (viewer ${viewerId})`);
         return;
     }
+
+    // If camera exists but videoWs not ready yet, queue the request for up to 6s
+    const videoReady = cam.videoWs?.readyState === WebSocket.OPEN;
+    const gameReady  = cam.ws?.readyState === WebSocket.OPEN;
+    if (!videoReady && !gameReady) {
+        if (!pendingViewerQueue.has(camId)) pendingViewerQueue.set(camId, []);
+        pendingViewerQueue.get(camId).push({ viewerId, queuedAt: Date.now() });
+        logger.cam(`⏳ VIEW queued for ${camId} (not yet ready) — viewer ${viewerId}`);
+        // Self-expiring: processed in flushPendingViewers on STREAM_START
+        return;
+    }
+
     cam.viewers.add(viewerId);
     sendToCam(camId, { type: 'VIEWER_JOINED', viewerId });
-    log(`👁️  Viewer ${viewerId} → cam ${camId}`);
+    logger.cam(`👁️  Viewer ${viewerId} → cam ${camId}`);
+}
+
+// Called after a camera's WebRTC link becomes ready (STREAM_START)
+function flushPendingViewers(camId) {
+    const queue = pendingViewerQueue.get(camId);
+    if (!queue || !queue.length) return;
+    const now    = Date.now();
+    const valid  = queue.filter(q => now - q.queuedAt < 6000);
+    const expired = queue.length - valid.length;
+    pendingViewerQueue.delete(camId);
+    if (expired > 0) logger.cam(`⚠️  ${expired} queued viewer(s) for ${camId} expired before flush`);
+    valid.forEach(({ viewerId }) => {
+        const cam = cameras.get(camId);
+        if (!cam) return;
+        cam.viewers.add(viewerId);
+        sendToCam(camId, { type: 'VIEWER_JOINED', viewerId });
+        logger.cam(`👁️  Flushed queued viewer ${viewerId} → cam ${camId}`);
+    });
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -728,11 +832,13 @@ function handleCamControlMsg(camId, msg) {
         case 'STREAM_START':
             cam.streaming = true;
             cam.label     = msg.label || camId;
-            log(`▶️  Camera ${camId} streaming`);
+            logger.cam(`▶️  Camera ${camId} streaming`);
             notifyMainCameraState();
             broadcastToLocalClients(JSON.stringify({
                 type: 'CAM_LIVE', camId, schoolId: CFG.schoolId, label: cam.label,
             }));
+            // Flush any VIEW_CAM_REQUEST that arrived before the cam was ready
+            flushPendingViewers(camId);
             break;
 
         case 'STREAM_STOP':
@@ -798,8 +904,30 @@ function handleCamControlMsg(camId, msg) {
         case 'PING':
             sendToCam(camId, { type: 'PONG' });
             break;
-    }
-}
+
+        // Camera phone sends its own JPEG thumbnail (from canvas) every ~2s
+        // while streaming. We relay it to MainServer as a binary frame so
+        // the admin host grid can show it without needing ffmpeg or recording.
+        case 'CAM_THUMB': {
+            if (!msg.jpeg || !mainConnected) break;
+            try {
+                const jpegBuf  = Buffer.from(msg.jpeg, 'base64');
+                const header   = JSON.stringify({
+                    type    : 'CAM_THUMBNAIL',
+                    schoolId: CFG.schoolId,
+                    camId,
+                    camKey  : `${CFG.schoolId}::${camId}`,
+                    ts      : Date.now(),
+                    w       : msg.w || 320,
+                });
+                const headerBuf = Buffer.alloc(256, 0);
+                headerBuf.write(header.substring(0, 255));
+                safeSendMainBinary(Buffer.concat([headerBuf, jpegBuf]));
+            } catch (_) {}
+            break;
+        }
+    }   // end switch
+}       // end handleCamControlMsg
 
 // ── Video chunk handler ────────────────────────────────────────────────────
 
@@ -993,13 +1121,18 @@ rl.on('line', async line => {
     const cmd = line.trim().toLowerCase();
     if (cmd === 'stop') await shutdown('CONSOLE');
     if (cmd === 'status') {
-        console.log('\n=== SCHOOL STATUS ===');
-        console.log(`School ID:   ${CFG.schoolId}`);
-        console.log(`Main connected: ${mainConnected ? 'YES' : 'NO'}`);
-        console.log(`Local clients:  ${localClients.size}`);
-        console.log(`Cameras:        ${cameras.size}`);
-        console.log(`Uptime:         ${Math.floor(process.uptime() / 60)} minutes`);
-        console.log('====================\n');
+        const camRows = [...cameras.entries()].map(([id, c]) =>
+            `${id}: ${c.streaming ? '🟢 live' : '⚫ idle'}${c.recording ? ' 🔴 rec' : ''}`
+        );
+        logger.statusBlock([
+            { key: 'School ID',      val: CFG.schoolId },
+            { key: 'Main server',    val: mainConnected ? '🟢 connected' : '🔴 disconnected', sub: CFG.mainServerWs },
+            { key: 'Reconnect #',    val: mainReconnectAttempts },
+            { key: 'Local clients',  val: localClients.size },
+            { key: 'Cameras',        val: cameras.size + (cameras.size ? '  — ' + camRows.join('  ') : '') },
+            { key: 'Uptime',         val: Math.floor(process.uptime() / 60) + ' min' },
+            { key: 'Pending viewers',val: [...pendingViewerQueue.values()].reduce((s, q) => s + q.length, 0) },
+        ]);
     }
 });
 
@@ -1031,11 +1164,19 @@ process.on('unhandledRejection', r => err(`Unhandled: ${r}`));
 // ══════════════════════════════════════════════════════════════════════════
 //  BOOT
 // ══════════════════════════════════════════════════════════════════════════
-log(`🏫 SchoolServer — ID: ${CFG.schoolId}`);
-log(`   MainServer : ${CFG.mainServerWs}`);
-log(`   Ports: game=${CFG.localPort}  http=${CFG.httpPort}  video=${CFG.videoPort}`);
-log(`   Max cameras : ${CFG.maxCams}`);
-log(`   Recordings  : ${CFG.recordingsDir}`);
-log(`   Static Root : ${CFG.staticRoot}`);
+logger.banner('SchoolServer', '2.0', [
+    { key: 'school id',   val: CFG.schoolId },
+    { key: 'main ws',     val: CFG.mainServerWs },
+    '---',
+    { key: 'game port',   val: `:${CFG.localPort}` },
+    { key: 'http port',   val: `:${CFG.httpPort}` },
+    { key: 'video port',  val: `:${CFG.videoPort}` },
+    { key: 'https port',  val: TLS_OK ? `:${CFG.httpsPort}  ✓ TLS ready` : `:${CFG.httpsPort}  ✗ no cert` },
+    '---',
+    { key: 'max cameras', val: CFG.maxCams },
+    { key: 'recordings',  val: CFG.recordingsDir },
+    { key: 'ffmpeg',      val: FFMPEG_OK ? CFG.ffmpegPath + '  ✓' : 'NOT FOUND  ✗' },
+    { key: 'static root', val: CFG.staticRoot },
+]);
 
 connectToMain();

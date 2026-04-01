@@ -429,13 +429,50 @@ async function startStream() {
     if (el('flip-btn'))  el('flip-btn').disabled = true;
 
     safeSend({ type: 'STREAM_START', camId, label: camId });
+    startThumbCapture();
     await acquireWakeLock();
     log('live · stream activ');
+}
+
+// ── Canvas thumbnail capture ──────────────────────────────────────────────────
+// Every 2s while streaming, grab a 320×180 frame from the preview <video> and
+// send it as a JPEG to the school server so the host's camera grid shows a live
+// thumbnail — without needing recording or ffmpeg.
+let _thumbTimer  = null;
+const _thumbCanvas = document.createElement('canvas');
+_thumbCanvas.width  = 320;
+_thumbCanvas.height = 180;
+const _thumbCtx = _thumbCanvas.getContext('2d');
+
+function startThumbCapture() {
+    stopThumbCapture();
+    _thumbTimer = setInterval(() => {
+        if (!streaming || !localStream || !authed) return;
+        const vid = el('preview-video');
+        if (!vid || vid.readyState < 2 || vid.videoWidth === 0) return;
+        try {
+            _thumbCtx.drawImage(vid, 0, 0, 320, 180);
+            _thumbCanvas.toBlob(blob => {
+                if (!blob || !authed || !ws || ws.readyState !== WebSocket.OPEN) return;
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const b64 = reader.result?.split(',')[1];
+                    if (b64) ws.send(JSON.stringify({ type: 'CAM_THUMB', jpeg: b64, w: 320, camId }));
+                };
+                reader.readAsDataURL(blob);
+            }, 'image/jpeg', 0.5);
+        } catch (_) {}
+    }, 2000);
+}
+
+function stopThumbCapture() {
+    if (_thumbTimer) { clearInterval(_thumbTimer); _thumbTimer = null; }
 }
 
 function stopStream() {
     if (!streaming) return;
     streaming = false;
+    stopThumbCapture();
 
     if (el('start-btn')) el('start-btn').style.display = 'flex';
     if (el('stop-btn'))  el('stop-btn').style.display  = 'none';
@@ -450,6 +487,7 @@ function stopStream() {
 
 function forceStopStream() {
     streaming = false;
+    stopThumbCapture();
     Object.keys(peerConns).forEach(id => closePeer(id));
     if (recording) stopMediaRecorder();
     if (el('start-btn')) el('start-btn').style.display = 'flex';
