@@ -379,10 +379,17 @@ const WS_URL       = window.__WS_URL__ || `ws://${location.hostname || 'localhos
         document.getElementById('res-total').textContent      = data.totalWords ?? 0;
         document.getElementById('res-percentile').textContent = data.stats?.percentile ?? '—';
 
+        // Show time if available
+        const timeEl = document.getElementById('res-time');
+        if (timeEl) {
+            const sec = data.elapsedSec ?? data.stats?.elapsedSec;
+            timeEl.textContent = sec != null ? sec + 's' : '—';
+        }
+
         const rankEl = document.getElementById('res-rank-display');
         if (data.stats?.rank && data.stats?.totalSpellers) {
             const medals = ['🥇','🥈','🥉'];
-            const medal = medals[data.stats.rank - 1] || '';
+            const medal  = medals[data.stats.rank - 1] || '';
             rankEl.textContent = `${medal} #${data.stats.rank} / ${data.stats.totalSpellers}`;
             rankEl.style.color = data.stats.rank <= 3 ? 'var(--main)' : 'var(--text)';
         } else {

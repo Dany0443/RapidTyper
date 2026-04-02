@@ -353,6 +353,16 @@ const WS_URL = window.__WS_URL__ || `ws://${location.hostname || "localhost"}:58
                 case 'ERROR':
                     console.error('Server error:', data.message);
                     break;
+
+                // Server computed the authoritative WPM — update results screen
+                case 'FINISH_ACK':
+                    document.getElementById('res-wpm').textContent  = data.wpm;
+                    document.getElementById('res-acc').textContent  = Math.max(0, data.acc) + '%';
+                    if (document.getElementById('res-raw'))
+                        document.getElementById('res-raw').textContent = data.raw;
+                    if (document.getElementById('res-cons'))
+                        document.getElementById('res-cons').textContent = data.consistency + '%';
+                    break;
             }
         }
 
@@ -662,7 +672,10 @@ const WS_URL = window.__WS_URL__ || `ws://${location.hostname || "localhost"}:58
                         acc: Math.max(0, acc), 
                         progress: progress,
                         errors: gameState.stats.errors,
-                        consistency: liveCons
+                        consistency: liveCons,
+                        // Raw char counts — server uses these to recompute WPM authoritatively
+                        correctChars: gameState.stats.correctChars,
+                        totalChars:   gameState.stats.totalChars,
                     }));
                 }
             }
@@ -678,7 +691,7 @@ const WS_URL = window.__WS_URL__ || `ws://${location.hostname || "localhost"}:58
             gameState.active = false;
             clearInterval(gameState.timer);
             
-            // Issue #3: cancel any existing reload timer before starting a new one
+            
             if (gameState.reloadTimer) {
                 clearInterval(gameState.reloadTimer);
                 gameState.reloadTimer = null;
@@ -719,15 +732,19 @@ const WS_URL = window.__WS_URL__ || `ws://${location.hostname || "localhost"}:58
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     type: 'FINISH',
-                    wpm: wpm,
+                    // Raw counts — server recomputes WPM using its own clock
+                    correctChars: gameState.stats.correctChars,
+                    totalChars:   gameState.stats.totalChars,
+                    errors:       gameState.stats.errors,
+                    consistency:  consistency,
+                    // Still include client-computed values as fallback for old server versions
+                    wpm:      wpm,
                     accuracy: Math.max(0, acc),
-                    raw: rawWpm,
-                    errors: gameState.stats.errors,
-                    consistency: consistency
+                    raw:      rawWpm,
                 }));
             }
 
-            // Issue #8: Only start reload countdown if this is the last round.
+            
             // For multi-round flows the server GAME_OVER handler moves to waiting-screen.
             let secondsLeft = 20; 
             const bar = document.getElementById('reload-bar');

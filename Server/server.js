@@ -311,8 +311,22 @@ function broadcastLobbyState() {
 function broadcastSpellerState() {
     const list = [...gameState.state.players.values()]
         .filter(p => p.role === 'speller')
-        .map(p => ({ userId: p.userId, username: p.username, grade: p.grade,
-                     score: p.score||0, status: p.status||'connected', finished: p.finished||false }));
+        .map(p => ({
+            userId        : p.userId,
+            username      : p.username,
+            grade         : p.grade,
+            score         : p.score         || 0,
+            elapsedSec    : p.elapsedMs != null ? parseFloat((p.elapsedMs / 1000).toFixed(1)) : null,
+            compositeScore: p.compositeScore || 0,
+            status        : p.status         || 'connected',
+            finished      : p.finished       || false,
+        }))
+        // Sort: finished first (by compositeScore desc), then unfinished
+        .sort((a, b) => {
+            if (a.finished && !b.finished) return -1;
+            if (!a.finished && b.finished) return 1;
+            return (b.compositeScore || 0) - (a.compositeScore || 0);
+        });
     broadcast({ type: 'UPDATE_SPELLERS', count: list.length, list,
                 spellRoundActive: gameState.state.spellRoundActive, serverTime: timeSync.getServerTime() });
 }
@@ -724,6 +738,9 @@ async function handleMessage(ws, data) {
             if (p?.role === 'player' && gameState.state.phase === 'RACING' && !p.finished) {
                 p.wpm = data.wpm||0; p.acc = data.acc||0; p.progress = data.progress||0;
                 p.errors = data.errors||0; p.consistency = data.consistency||0;
+                // Store raw char counts so server can recompute WPM authoritatively at finish
+                if (typeof data.correctChars === 'number') p.correctChars = data.correctChars;
+                if (typeof data.totalChars   === 'number') p.totalChars   = data.totalChars;
                 broadcastLobbyState();
             }
             break;
@@ -1239,19 +1256,58 @@ async function handleJoinSpell(ws, data) {
 
 async function handleFinish(ws, data) {
     const p = gameState.state.players.get(ws);
+    // Accept FINISH during RACING or up to 3s into ROUND_END (late packets)
     if (gameState.state.phase !== 'RACING' && gameState.state.phase !== 'ROUND_END') return;
-    if (p?.role === 'player' && !p.finished) {
-        p.finished = true; p.wpm = data.wpm||0; p.acc = data.accuracy||0;
-        p.raw = data.raw||0; p.consistency = data.consistency||0; p.errors = data.errors||0;
-        p.finishTime = timeSync.getServerTime();
-        sysLog(`🏁 ${p.username}: ${p.wpm} CPM ${p.acc}%`);
-        if (gameState.state.gameId) {
-            try { await dbRun(`INSERT INTO sessions(id,user_id,grade,wpm,acc,raw,consistency,errors)VALUES(?,?,?,?,?,?,?,?)`,
-                [`${gameState.state.gameId}_${p.userId}`, p.userId, p.grade, p.wpm, p.acc, p.raw, p.consistency, p.errors]); }
-            catch (_) {}
-        }
-        broadcastLobbyState();
+    if (p?.role !== 'player' || p.finished) return;
+
+    p.finished    = true;
+    p.finishTime  = timeSync.getServerTime();
+    p.errors      = data.errors      || 0;
+    p.consistency = data.consistency || 0;
+
+    // ── Server-authoritative WPM calculation ──────────────────────────────
+    // Use raw char counts if the client sent them (new protocol).
+    // Fall back to the client's claimed WPM only if no char data available.
+    const startTime = gameState.state.startTime || p.finishTime;
+
+    if (typeof data.correctChars === 'number' && data.correctChars >= 0) {
+        // New path: server owns the clock and the formula
+        const elapsedMs  = Math.max(p.finishTime - startTime, 1000); // min 1s
+        const elapsedMin = elapsedMs / 60000;
+        const totalChars = typeof data.totalChars === 'number' ? data.totalChars : data.correctChars;
+        p.correctChars   = data.correctChars;
+        p.totalChars     = totalChars;
+        p.wpm  = Math.round((data.correctChars / 5) / elapsedMin);
+        p.raw  = Math.round((totalChars / 5) / elapsedMin);
+        p.acc  = totalChars === 0 ? 100
+               : Math.max(0, Math.round(((totalChars - p.errors) / totalChars) * 100));
+    } else {
+        // Legacy path: client sent pre-computed wpm (old clients / school proxy)
+        p.wpm = data.wpm      || 0;
+        p.raw = data.raw      || 0;
+        p.acc = data.accuracy || data.acc || 0;
     }
+
+    // Echo the server-computed WPM back to the client so its results screen matches
+    const wsSend = obj => {
+        const s = JSON.stringify(obj);
+        if (ws instanceof VirtualClient) { try { ws.send(s); } catch (_) {} }
+        else if (ws.readyState === WebSocket.OPEN) { try { ws.send(s); } catch (_) {} }
+    };
+    wsSend({ type: 'FINISH_ACK', wpm: p.wpm, raw: p.raw, acc: p.acc, errors: p.errors, consistency: p.consistency });
+
+    sysLog(`🏁 ${p.username}: ${p.wpm} CPM  ${p.acc}%  (${typeof data.correctChars === 'number' ? 'server-calc' : 'client-claim'})`);
+
+    if (gameState.state.gameId) {
+        try {
+            await dbRun(
+                `INSERT INTO sessions(id,user_id,grade,wpm,acc,raw,consistency,errors)VALUES(?,?,?,?,?,?,?,?)`,
+                [`${gameState.state.gameId}_${p.userId}`, p.userId, p.grade,
+                 p.wpm, p.acc, p.raw, p.consistency, p.errors]
+            );
+        } catch (_) {}
+    }
+    broadcastLobbyState();
 }
 
 async function handleSpellSubmit(ws, data) {
@@ -1259,26 +1315,77 @@ async function handleSpellSubmit(ws, data) {
     if (!gameState.state.spellRoundActive) { wsSend(ws, { type: 'ERROR', message: 'No active round.' }); return; }
     if (player?.finished || !player || !gameState.state.spellText) return;
 
-    const tw   = gameState.state.spellText.trim().split(/\s+/);
-    const sw   = (data.text||'').trim().split(/\s+/);
-    const norm = w => w.toLowerCase().replace(/^[\W]+|[\W]+$/g, '');
-    let correct = 0; const diff = [];
-    for (let i = 0; i < Math.max(tw.length, sw.length); i++) {
-        const t = tw[i]||'', s = sw[i]||'', ok = t && s && norm(t) === norm(s);
-        if (ok) { correct++; diff.push({ word: s, status: 'correct' }); }
-        else    { diff.push({ word: s||'—', status: 'wrong', expected: t }); }
-    }
-    const acc  = Math.round((correct / tw.length) * 100);
-    const all  = [...gameState.state.players.values()].filter(p => p.role === 'speller');
-    const perc = all.length > 1 ? Math.round((all.filter(p => (p.score||0) < acc).length / (all.length-1)) * 100) : 100;
-    const rank = all.filter(p => p.finished && (p.score||0) > acc).length + 1;
-    player.score = acc; player.finished = true;
-    wsSend(ws, { type: 'SPELL_RESULT_FULL', accuracy: acc, diff, correctCount: correct, totalWords: tw.length, stats: { correct, incorrect: tw.length-correct, percentile: perc, rank, totalSpellers: all.length } });
+    // ── Server-authoritative submit time ─────────────────────────────────────
+    const submitTime   = timeSync.getServerTime();
+    const roundStart   = gameState.state.spellStartTime || submitTime;
+    const elapsedMs    = Math.max(submitTime - roundStart, 0);
+    const elapsedSec   = (elapsedMs / 1000).toFixed(1);
 
-    // Notify host of this submission live
+    // ── Score the submission ──────────────────────────────────────────────────
+    const tw   = gameState.state.spellText.trim().split(/\s+/);
+    const sw   = (data.text || '').trim().split(/\s+/);
+    const norm = w => w.toLowerCase().replace(/^[\W]+|[\W]+$/g, '');
+    let correct = 0;
+    const diff  = [];
+    for (let i = 0; i < Math.max(tw.length, sw.length); i++) {
+        const t  = tw[i] || '', s = sw[i] || '';
+        const ok = t && s && norm(t) === norm(s);
+        if (ok) { correct++; diff.push({ word: s, status: 'correct' }); }
+        else    { diff.push({ word: s || '—', status: 'wrong', expected: t }); }
+    }
+    const acc = Math.round((correct / tw.length) * 100);
+
+    // ── Composite score: accuracy is primary, elapsed time is tiebreaker ─────
+    // Higher = better. Among equal accuracy, faster (lower ms) wins.
+    // 1 point of accuracy is worth 10 minutes of time — accuracy always dominates.
+    const compositeScore = acc * 600000 - elapsedMs;
+
+    player.score          = acc;
+    player.elapsedMs      = elapsedMs;
+    player.compositeScore = compositeScore;
+    player.submitTime     = submitTime;
+    player.finished       = true;
+
+    // ── Rank among all spellers who have already submitted ───────────────────
+    const all      = [...gameState.state.players.values()].filter(p => p.role === 'speller');
+    const finished = all.filter(p => p.finished);
+
+    // Rank = how many finished players have a strictly better compositeScore + 1
+    const rank = finished.filter(p => p !== player && (p.compositeScore || 0) > compositeScore).length + 1;
+
+    // Percentile = how many submitted players scored strictly lower (out of non-self)
+    const others = all.filter(p => p.finished && p !== player);
+    const perc   = others.length === 0 ? 100
+                 : Math.round((others.filter(p => (p.compositeScore || 0) < compositeScore).length / others.length) * 100);
+
+    sysLog(`📝 ${player.username}: ${acc}% (${correct}/${tw.length}) in ${elapsedSec}s — rank #${rank}`);
+
+    wsSend(ws, {
+        type        : 'SPELL_RESULT_FULL',
+        accuracy    : acc,
+        diff,
+        correctCount: correct,
+        totalWords  : tw.length,
+        elapsedSec  : parseFloat(elapsedSec),
+        stats: {
+            correct,
+            incorrect  : tw.length - correct,
+            percentile : perc,
+            rank,
+            totalSpellers: all.length,
+            elapsedSec : parseFloat(elapsedSec),
+        }
+    });
+
+    // Notify host live
     for (const [hws, hp] of gameState.state.players) {
         if (hp.role === 'admin') {
-            const n = JSON.stringify({ type: 'SPELL_LIVE_UPDATE', user: player.username, grade: player.grade, correct: acc >= 90, accuracy: acc });
+            const n = JSON.stringify({
+                type: 'SPELL_LIVE_UPDATE',
+                user: player.username, grade: player.grade,
+                correct: acc >= 90, accuracy: acc,
+                elapsedSec: parseFloat(elapsedSec),
+            });
             if (hws instanceof VirtualClient) { try { hws.send(n); } catch (_) {} }
             else if (hws.readyState === WebSocket.OPEN) { try { hws.send(n); } catch (_) {} }
         }
@@ -1311,9 +1418,42 @@ async function startGame() {
 async function endGame() {
     if (gameState.state.phase !== 'RACING') return;
     const round = gameState.state.currentRound, isLast = round >= gameState.state.maxRounds;
-    await gameState.transition('ROUND_END', { endTime: timeSync.getServerTime() });
+    const endTime = timeSync.getServerTime();
+    await gameState.transition('ROUND_END', { endTime });
+
+    // ── Compute final WPM for players whose timer fired (never sent FINISH) ──
+    // They've been sending PROGRESS_UPDATE with correctChars so we have the data.
+    const startTime   = gameState.state.startTime || endTime;
+    const elapsedMin  = Math.max(endTime - startTime, 1000) / 60000;
+    for (const p of gameState.state.players.values()) {
+        if (p.role !== 'player' || p.finished) continue;
+        // Player ran out of time — compute from the last known char counts
+        if (typeof p.correctChars === 'number') {
+            p.wpm = Math.round((p.correctChars / 5) / elapsedMin);
+            p.raw = typeof p.totalChars === 'number'
+                ? Math.round((p.totalChars / 5) / elapsedMin)
+                : p.wpm;
+            if (typeof p.totalChars === 'number' && p.totalChars > 0) {
+                p.acc = Math.max(0, Math.round(((p.totalChars - (p.errors||0)) / p.totalChars) * 100));
+            }
+        }
+        p.finished   = true;
+        p.finishTime = endTime;
+        // Persist to DB
+        if (gameState.state.gameId) {
+            dbRun(
+                `INSERT OR IGNORE INTO sessions(id,user_id,grade,wpm,acc,raw,consistency,errors)VALUES(?,?,?,?,?,?,?,?)`,
+                [`${gameState.state.gameId}_${p.userId}`, p.userId, p.grade,
+                 p.wpm||0, p.acc||0, p.raw||0, p.consistency||0, p.errors||0]
+            ).catch(() => {});
+        }
+    }
+
     saveResults();
-    const rankings = [...gameState.state.players.values()].filter(p => p.role==='player').sort((a,b)=>(b.wpm||0)-(a.wpm||0)).map((p,i)=>({userId:p.userId,rank:i+1}));
+    const rankings = [...gameState.state.players.values()]
+        .filter(p => p.role === 'player')
+        .sort((a,b) => (b.wpm||0) - (a.wpm||0))
+        .map((p,i) => ({ userId: p.userId, rank: i+1 }));
     broadcast({ type: 'GAME_OVER', round, maxRounds: gameState.state.maxRounds, isLastRound: isLast, rankings, totalPlayers: rankings.length, serverTime: timeSync.getServerTime() });
     if (isLast) broadcast({ type: 'SERIES_COMPLETE', round, maxRounds: gameState.state.maxRounds, serverTime: timeSync.getServerTime() });
     sysLog(isLast ? '🏁 Series complete' : `⏳ Round ${round} done`);
