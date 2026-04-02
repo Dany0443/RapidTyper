@@ -280,29 +280,6 @@ function logoutStream() {
 //  CAMERA
 // ════════════════════════════════════════════════════════════
 
-function initVideoSocket() {
-    videoWs = new WebSocket(VIDEO_WS_URL);
-    videoWs.binaryType = 'arraybuffer'; // Crucial for binary chunks
-
-    videoWs.onopen = () => {
-        log('📹 Video socket open, authenticating...');
-        // MANDATORY: The server won't record without this!
-        videoWs.send(JSON.stringify({
-            type: 'STREAM_AUTH',
-            camId: myCamId, // Ensure this is the same ID used in the game socket
-            key: STREAM_KEY
-        }));
-    };
-
-    videoWs.onclose = () => {
-        log('📹 Video socket closed, retrying...');
-        setTimeout(initVideoSocket, 2000);
-    };
-
-    videoWs.onerror = (e) => err('📹 Video socket error', e);
-}
-
-
 /**
  * Returns navigator.mediaDevices or null.
  * On plain HTTP (non-localhost) the API is blocked by browsers — show a clear
@@ -565,7 +542,16 @@ function startMediaRecorder() {
         if (typeof MediaRecorder === 'undefined') log('⚠ MediaRecorder not supported');
         return;
     }
-    if (videoWs) { try { videoWs.close(); } catch (_) {} videoWs = null; }
+    // Only close videoWs if it's in a broken state — don't close a healthy one
+    if (videoWs && videoWs.readyState !== WebSocket.OPEN && videoWs.readyState !== WebSocket.CONNECTING) {
+        try { videoWs.close(); } catch (_) {}
+        videoWs = null;
+    }
+    // If already open and authed, go straight to recorder
+    if (videoWs && videoWs.readyState === WebSocket.OPEN) {
+        actuallyStartMediaRecorder();
+        return;
+    }
 
     try { videoWs = new WebSocket(VIDEO_WS_URL); }
     catch (e) { log('⚠ videoWs: ' + e.message); return; }

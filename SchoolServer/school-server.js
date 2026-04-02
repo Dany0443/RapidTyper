@@ -577,30 +577,28 @@ function startRecording(camId) {
         cam.recFile   = null;
     });
 
-    // ALWAYS write the initChunk first if it exists
+    // Write init segment first (captured from the very first chunk of this stream)
+    let preBytes = 0;
     if (cam.initChunk) {
         cam.recFile.write(cam.initChunk);
-        cam.bytesWritten += cam.initChunk.length;
+        preBytes += cam.initChunk.length;
     }
-    
 
-    // ── Flush buffered chunks so the file starts with the init segment ──
+    // Then flush ring-buffered chunks (skip the first one — it IS the init chunk)
     const buffered = chunkBuffers.get(camId) || [];
-    for (const b of buffered) {
-        cam.recFile.write(b);
-        cam.bytesWritten += b.length;
+    const toFlush  = (cam.initChunk && buffered[0] === cam.initChunk)
+        ? buffered.slice(1)
+        : buffered;
+    for (const chunk of toFlush) {
+        try {
+            cam.recFile.write(chunk);
+            preBytes += chunk.length;
+        } catch (e) { err(`Buffer flush error (${camId}): ${e.message}`); break; }
     }
-    if (buffered.length > 0) {
-        log(`🔴 Writing ${buffered.length} buffered chunk(s) → ${filename}`);
-        for (const chunk of buffered) {
-            try {
-                cam.recFile.write(chunk);
-                cam.bytesWritten += chunk.length;
-            } catch (e) { err(`Buffer flush error (${camId}): ${e.message}`); break; }
-        }
-    } else {
-        log(`🔴 Recording started (no buffer yet): ${filename}`);
-    }
+    cam.bytesWritten = preBytes;
+
+    log(`🔴 Recording started: ${filename}  (pre-loaded ${preBytes} bytes from ${toFlush.length + (cam.initChunk ? 1 : 0)} chunk(s))`);
+
     // Clear buffer — from here chunks write directly
     chunkBuffers.set(camId, []);
 
@@ -828,8 +826,18 @@ videoWss.on('connection', ws => {
         const cam = cameras.get(ws.camId);
         if (!cam) return;
         cam.videoWs = null;
-        if (cam.recording) stopRecording(ws.camId);
-        if (!cam.ws || cam.ws.readyState !== WebSocket.OPEN) {
+
+        // Only stop recording and delete camera if:
+        //   - the game WS is also gone (camera truly offline), OR
+        //   - the camera is not streaming at all
+        // Do NOT stop recording just because the video WS cycled —
+        // startMediaRecorder() on the phone closes and reopens the video WS every
+        // time the host triggers recording, which would cancel the recording immediately.
+        const gameAlive = cam.ws?.readyState === WebSocket.OPEN;
+        if (cam.recording && !gameAlive) {
+            stopRecording(ws.camId);
+        }
+        if (!gameAlive) {
             cameras.delete(ws.camId);
             notifyMainCameraState();
         }
